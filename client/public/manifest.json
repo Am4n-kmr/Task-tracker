@@ -1,0 +1,21 @@
+{
+  "name": "TaskTracker - Daily Productivity",
+  "short_name": "TaskTracker",
+  "description": "Track your daily tasks and boost productivity",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#1e40af",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "/icons.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
