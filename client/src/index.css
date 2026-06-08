@@ -266,25 +266,6 @@ button:focus-visible, a:focus-visible, input:focus-visible {
 .checkin-scroll::-webkit-scrollbar { height: 3px; }
 .checkin-scroll::-webkit-scrollbar-thumb { background: var(--text-muted); border-radius: 2px; }
 
-/* Monthly tracker sticky headers */
-.monthly-tracker-wrapper {
-  position: relative;
-  overflow: auto;
-  max-height: 70vh;
-}
-
-.monthly-tracker-header {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-}
-
-.monthly-tracker-task-name {
-  position: sticky;
-  left: 0;
-  z-index: 5;
-}
-
 /* Chart container - compact */
 .chart-container {
   width: 100%;
@@ -336,4 +317,672 @@ button:focus-visible, a:focus-visible, input:focus-visible {
 /* Print styles */
 @media print {
   .fab, .sidebar { display: none !important; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Monthly Tracker - CSS Grid Layout
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Wrapper with horizontal scroll */
+.monthly-tracker-wrapper {
+  position: relative;
+  overflow: auto;
+  max-height: 70vh;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+}
+
+.monthly-tracker-wrapper::-webkit-scrollbar {
+  height: 6px;
+}
+.monthly-tracker-wrapper::-webkit-scrollbar-thumb {
+  background: var(--text-muted);
+  border-radius: 3px;
+}
+
+/* Grid container */
+.monthly-tracker-grid {
+  display: grid;
+  grid-template-columns: 200px repeat(var(--monthly-days, 31), 42px);
+  min-width: max-content;
+}
+
+/* Each row in the grid */
+.monthly-grid-row {
+  display: contents;
+}
+
+/* Header row grid cells */
+.monthly-grid-header .monthly-grid-cell {
+  padding: 6px 4px;
+  border-bottom: 2px solid var(--border-color);
+  font-weight: 600;
+}
+
+/* Individual grid cells */
+.monthly-grid-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding: 2px;
+  border-right: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 11px;
+  text-align: center;
+  position: relative;
+  box-sizing: border-box;
+}
+
+/* Remove border from last cell in each row */
+.monthly-grid-cell:last-child {
+  border-right: none;
+}
+
+/* Task header cell (top-left sticky) */
+.monthly-task-header {
+  display: flex !important;
+  align-items: center;
+  justify-content: flex-start;
+  padding-left: 12px !important;
+  font-size: 11px;
+  border-right: 2px solid var(--border-color);
+}
+
+/* Day header cells */
+.monthly-day-header {
+  gap: 0px;
+  padding: 4px 2px !important;
+}
+
+/* TODAY indicator badge - ALWAYS topmost */
+.monthly-today-badge {
+  font-size: 7px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: rgba(255, 255, 255, 0.2);
+  padding: 0px 3px;
+  border-radius: 2px;
+  line-height: 1.3;
+  margin-bottom: 1px;
+  white-space: nowrap;
+}
+
+/* Day name (Mon, Tue, etc.) */
+.monthly-day-name {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+/* Date number */
+.monthly-date-num {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+/* Sticky column (task name column) */
+.sticky-col {
+  position: sticky;
+  left: 0;
+  z-index: 10;
+  border-right: 2px solid var(--border-color);
+}
+
+/* Task header in sticky column */
+.monthly-task-header.sticky-col {
+  z-index: 12;
+}
+
+/* Task row cells */
+.monthly-task-cell {
+  display: flex !important;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 2px 6px !important;
+  min-height: 38px;
+}
+
+/* Task controls wrapper */
+.monthly-task-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  overflow: hidden;
+}
+
+/* Reorder buttons container */
+.monthly-reorder-btns {
+  display: flex;
+  flex-direction: column;
+  gap: 0px;
+  flex-shrink: 0;
+}
+
+.monthly-reorder-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 12px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0;
+  border-radius: 2px;
+  transition: all 0.15s;
+}
+
+.monthly-reorder-btn:hover:not(:disabled) {
+  background: var(--hover-bg);
+  color: var(--text-primary) !important;
+}
+
+.monthly-reorder-btn:disabled {
+  cursor: not-allowed;
+}
+
+/* Task title */
+.monthly-task-title {
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  flex: 1;
+  min-width: 0;
+  padding: 2px 4px;
+  border-radius: 3px;
+  transition: background 0.15s;
+}
+
+.monthly-task-title:hover {
+  background: var(--hover-bg);
+}
+
+/* Task action buttons */
+.monthly-task-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.monthly-task-cell:hover .monthly-task-actions {
+  opacity: 1;
+}
+
+/* Reorder buttons also appear on hover */
+.monthly-reorder-btns {
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.monthly-task-cell:hover .monthly-reorder-btns {
+  opacity: 1;
+}
+
+.monthly-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0;
+  border-radius: 4px;
+  transition: all 0.15s;
+}
+
+.monthly-action-btn:hover {
+  background: var(--hover-bg);
+  transform: scale(1.1);
+}
+
+/* Inline edit form */
+.monthly-edit-form {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+}
+
+.monthly-edit-input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  outline: none;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.monthly-edit-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.monthly-edit-save,
+.monthly-edit-cancel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0;
+  border-radius: 4px;
+  transition: all 0.15s;
+}
+
+.monthly-edit-save:hover,
+.monthly-edit-cancel:hover {
+  background: var(--hover-bg);
+}
+
+/* Delete confirmation */
+.monthly-delete-confirm {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Completion cells - exactly aligned with day headers */
+.monthly-completion-cell {
+  cursor: pointer;
+  transition: all 0.15s ease;
+  min-height: 38px;
+}
+
+.monthly-completion-cell:hover {
+  transform: scale(1.05);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+  z-index: 2;
+}
+
+.monthly-completion-cell.is-completed {
+  background-color: var(--success) !important;
+}
+
+.monthly-completion-cell.is-today {
+  background-color: rgba(59, 130, 246, 0.05);
+}
+
+/* Today column highlight for the entire column */
+.monthly-day-header.is-today {
+  position: relative;
+}
+
+.monthly-grid-row .monthly-grid-cell.is-today {
+  background-color: rgba(59, 130, 246, 0.03);
+}
+
+/* Check icon in completed cells */
+.monthly-check-icon {
+  pointer-events: none;
+}
+
+/* Empty dot placeholder for non-completed cells */
+.monthly-empty-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border-color);
+  opacity: 0.3;
+}
+
+/* Row hover effect */
+.monthly-grid-task-row .monthly-grid-cell {
+  transition: background-color 0.15s;
+}
+
+.monthly-grid-task-row:hover .monthly-grid-cell {
+  background-color: var(--hover-bg) !important;
+}
+
+.monthly-grid-task-row:hover .monthly-grid-cell.is-today {
+  background-color: rgba(59, 130, 246, 0.06) !important;
+}
+
+.monthly-grid-task-row:hover .monthly-grid-cell.is-completed {
+  background-color: #059669 !important;
+}
+
+/* Weekend styling */
+.monthly-day-header.is-weekend {
+  opacity: 0.6;
+}
+
+/* Responsive behavior */
+@media (max-width: 768px) {
+  .monthly-tracker-grid {
+    grid-template-columns: 160px repeat(var(--monthly-days, 31), 38px);
+  }
+  
+  .sticky-col {
+    z-index: 10;
+  }
+  
+  .monthly-task-title {
+    font-size: 11px;
+  }
+  
+  .monthly-day-name {
+    font-size: 9px;
+  }
+  
+  .monthly-date-num {
+    font-size: 11px;
+  }
+  
+  .monthly-task-controls {
+    gap: 2px;
+  }
+}
+
+@media (max-width: 480px) {
+  .monthly-tracker-grid {
+    grid-template-columns: 140px repeat(var(--monthly-days, 31), 36px);
+  }
+}
+
+/* Keep task name visible while scrolling */
+@media (hover: none) {
+  .monthly-task-actions,
+  .monthly-reorder-btns {
+    opacity: 1;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Dashboard Check-in Board
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* Horizontal scroll container */
+.checkin-board-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: smooth;
+  padding-bottom: 2px;
+}
+
+.checkin-board-scroll::-webkit-scrollbar {
+  height: 3px;
+}
+.checkin-board-scroll::-webkit-scrollbar-thumb {
+  background: var(--text-muted);
+  border-radius: 2px;
+}
+
+/* Table layout - ensures perfect column alignment */
+.checkin-board-table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: max-content;
+  table-layout: fixed;
+}
+
+/* Header cells */
+.checkin-board-th {
+  padding: 6px 4px;
+  text-align: center;
+  font-weight: 500;
+  font-size: 10px;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background-color: var(--card-bg);
+  border-bottom: 2px solid var(--border-color);
+  white-space: nowrap;
+  vertical-align: top;
+}
+
+/* Task column (sticky left) */
+.checkin-task-col {
+  position: sticky;
+  left: 0;
+  z-index: 10;
+  background-color: var(--card-bg);
+  border-right: 2px solid var(--border-color);
+  text-align: left;
+  width: 180px;
+  min-width: 140px;
+  max-width: 200px;
+}
+
+/* Day columns */
+.checkin-day-col {
+  width: 48px;
+  min-width: 42px;
+  max-width: 56px;
+}
+
+/* TODAY badge */
+.checkin-today-badge {
+  display: block;
+  font-size: 7px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: white;
+  background: var(--accent);
+  padding: 0 3px;
+  border-radius: 2px;
+  line-height: 1.4;
+  margin-bottom: 1px;
+  white-space: nowrap;
+}
+
+/* Day name */
+.checkin-day-name {
+  display: block;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+/* Date number */
+.checkin-date-num {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+/* Today header highlight */
+.checkin-board-th.is-today {
+  background-color: var(--accent);
+  color: white;
+  border-radius: 4px 4px 0 0;
+}
+
+/* Table data cells */
+.checkin-board-td {
+  padding: 3px 2px;
+  text-align: center;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* Today column highlight */
+.checkin-board-td.is-today {
+  background-color: rgba(59, 130, 246, 0.04);
+}
+
+/* Row hover */
+.checkin-board-tr:hover .checkin-board-td {
+  background-color: var(--hover-bg);
+}
+
+.checkin-board-tr:hover .checkin-board-td.is-today {
+  background-color: rgba(59, 130, 246, 0.07);
+}
+
+/* Task title */
+.checkin-task-title {
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  flex: 1;
+  min-width: 0;
+  padding: 1px 3px;
+  border-radius: 2px;
+  transition: background 0.1s;
+}
+
+.checkin-task-title:hover {
+  background: var(--hover-bg);
+}
+
+/* Action buttons (edit/delete) - hidden by default, show on hover */
+.checkin-task-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.checkin-board-tr:hover .checkin-task-actions {
+  opacity: 1;
+}
+
+.checkin-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0;
+  border-radius: 3px;
+  transition: all 0.1s;
+  color: var(--text-muted);
+}
+
+.checkin-action-btn:hover {
+  background: var(--hover-bg);
+  transform: scale(1.1);
+}
+
+/* Reorder buttons */
+.checkin-reorder-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.checkin-board-tr:hover .checkin-reorder-group {
+  opacity: 1;
+}
+
+.checkin-reorder-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 10px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0;
+  border-radius: 1px;
+  transition: all 0.1s;
+  color: var(--text-muted);
+}
+
+.checkin-reorder-btn:hover:not(:disabled) {
+  background: var(--hover-bg);
+  color: var(--text-primary) !important;
+}
+
+.checkin-reorder-btn:disabled {
+  cursor: not-allowed;
+}
+
+/* Checkbox cell button */
+.checkin-cell-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0;
+  border-radius: 50%;
+  transition: all 0.15s ease;
+}
+
+.checkin-cell-btn:hover:not(:disabled) {
+  transform: scale(1.2);
+}
+
+.checkin-cell-btn:disabled {
+  cursor: default;
+}
+
+/* Check animation */
+.checkin-check-icon {
+  animation: checkPop 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Touch devices - show actions always */
+@media (hover: none) {
+  .checkin-task-actions,
+  .checkin-reorder-group {
+    opacity: 1;
+  }
+}
+
+/* Responsive adjustments */
+@media (max-width: 480px) {
+  .checkin-task-col {
+    min-width: 110px;
+    max-width: 140px;
+  }
+  .checkin-day-col {
+    min-width: 36px;
+    width: 40px;
+  }
+  .checkin-board-th {
+    padding: 4px 2px;
+  }
+  .checkin-board-td {
+    padding: 2px 1px;
+  }
+}
+
+@media (min-width: 768px) {
+  .checkin-day-col {
+    width: 52px;
+    min-width: 48px;
+  }
 }

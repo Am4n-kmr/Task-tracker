@@ -56,14 +56,39 @@ async function initializeSchema() {
       );
     `);
 
-    // Tasks table
+    // Tasks table (with task_order)
     await client.query(`
       CREATE TABLE IF NOT EXISTS tasks (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         title VARCHAR(255) NOT NULL,
+        task_order INTEGER DEFAULT 0,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       );
+    `);
+
+    // Add task_order column if it doesn't exist (migration)
+    await client.query(`
+      DO $$ 
+      BEGIN 
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name = 'tasks' AND column_name = 'task_order'
+        ) THEN
+          ALTER TABLE tasks ADD COLUMN task_order INTEGER DEFAULT 0;
+        END IF;
+      END $$;
+    `);
+
+    // Set initial task_order values for existing tasks
+    await client.query(`
+      UPDATE tasks t
+      SET task_order = t2.new_order
+      FROM (
+        SELECT id, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at ASC) - 1 as new_order
+        FROM tasks
+      ) t2
+      WHERE t.id = t2.id AND t.task_order IS NULL;
     `);
 
     // Task completions table

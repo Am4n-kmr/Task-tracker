@@ -23,6 +23,8 @@ export const getMonthName = (month) => {
     'January', 'February', 'March', 'April', 'May', 'June',
     'July', 'August', 'September', 'October', 'November', 'December'
   ];
+  // Guard against NaN, undefined, null, out of bounds
+  if (typeof month !== 'number' || month < 1 || month > 12) return '';
   return months[month - 1];
 };
 

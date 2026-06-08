@@ -1,5 +1,5 @@
-import { useState, useMemo, memo, useCallback, useRef } from 'react';
-import { Plus, Target, Flame, Trophy, CheckCircle, Circle, Search, X, ChevronDown, ChevronUp, Activity, Calendar } from 'lucide-react';
+import { useState, useMemo, memo, useCallback, useRef, useEffect } from 'react';
+import { Plus, Target, Flame, Trophy, CheckCircle, Circle, X, ChevronDown, ChevronUp, Activity, Edit2, Trash2, Check } from 'lucide-react';
 import { useTasks, useDashboard } from '../hooks/useTasks';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
@@ -14,51 +14,74 @@ import {
   Tooltip,
   Filler,
 } from 'chart.js';
+import { tasksAPI } from '../services/api';
+import toast from 'react-hot-toast';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Filler);
 
-// ── Debug flag ────────────────────────────────────────────────────────────
-// Set to `true` while diagnosing rerenders, `false` for production.
-const DEBUG_RERENDERS = true;
-const dlog = (...args) => {
-  if (DEBUG_RERENDERS) console.log(...args);
-};
+// ── Debug ────────────────────────────────────────────────────────────
+const DEBUG_RERENDERS = false;
+const dlog = (...args) => { if (DEBUG_RERENDERS) console.log(...args); };
+
+/* ── Responsive day count ─────────────────────────────────────────── */
+function getDayCount() {
+  const w = window.innerWidth;
+  if (w < 480) return 5;   // mobile: last 4 + today
+  if (w < 768) return 5;   // small tablet: last 4 + today
+  if (w < 1024) return 7;  // tablet: last 6 + today
+  return 8;                 // desktop: last 7 + today
+}
+
+/* ── Build recent days (newest RIGHT) ─────────────────────────────── */
+function buildRecentDays(count) {
+  const days = [];
+  const now = new Date();
+  // count-1 days ago through today
+  for (let i = count - 1; i >= 0; i--) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - i);
+    days.push({
+      date: d.toISOString().split('T')[0],
+      label: i === 0 ? 'Today' : i === 1 ? 'Yesterday' : d.toLocaleDateString('en-US', { weekday: 'short' }),
+      dayName: d.toLocaleDateString('en-US', { weekday: 'short' }),
+      day: d.getDate(),
+      isToday: i === 0,
+      month: d.getMonth(),
+      dateObj: d,
+    });
+  }
+  return days; // oldest left, newest right
+}
 
 export default function Dashboard() {
   dlog('Dashboard render');
 
   const { user } = useAuth();
   const { theme } = useTheme();
-  // We pass `searchTerm` to the hook so it can build a stable query key.
-  // The SyncContext bump() is gone — React Query owns the cache now.
-  const [searchTerm, setSearchTerm] = useState('');
-  const { tasks, loading: tasksLoading, togglingId, createTask, deleteTask, toggleTask } =
-    useTasks(searchTerm);
+  const { tasks, loading: tasksLoading, togglingId, createTask, updateTask, deleteTask, toggleTask } = useTasks();
   const { data: stats, loading: statsLoading } = useDashboard();
 
-  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [dayCount, setDayCount] = useState(() => getDayCount());
   const [showAddForm, setShowAddForm] = useState(false);
+  const [newTaskTitle, setNewTaskTitle] = useState('');
   const [isCreating, setIsCreating] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [editingTaskId, setEditingTaskId] = useState(null);
+  const [editingTitle, setEditingTitle] = useState('');
+  const [deleteConfirmId, setDeleteConfirmId] = useState(null);
   const [showGraph, setShowGraph] = useState(true);
 
-  // Only show the full-page skeleton on the FIRST load. Subsequent
-  // background refetches must NOT cause a remount / flicker.
-  const hasLoadedRef = useRef(false);
-  const showInitialSkeleton =
-    !hasLoadedRef.current && (tasksLoading || statsLoading);
-  if (!(tasksLoading || statsLoading)) {
-    hasLoadedRef.current = true;
-  }
+  const containerRef = useRef(null);
 
-  const today = useMemo(
-    () =>
-      new Date().toLocaleDateString('en-US', {
-        weekday: 'long',
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-      }),
-    []
+  // Recent days (computed once)
+  const recentDays = useMemo(() => buildRecentDays(Math.max(dayCount, 4)), [dayCount]);
+
+  const hasLoadedRef = useRef(false);
+  const showInitialSkeleton = !hasLoadedRef.current && (tasksLoading || statsLoading);
+  if (!(tasksLoading || statsLoading)) hasLoadedRef.current = true;
+
+  const today = useMemo(() =>
+    new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }), []
   );
 
   const greeting = useMemo(() => {
@@ -68,54 +91,78 @@ export default function Dashboard() {
     return 'Good Evening';
   }, []);
 
-  // The optimistic update already happened inside the hook. Wrapper is
-  // a fire-and-forget — UI is already updated.
-  const handleToggleTask = useCallback(
-    (id) => {
-      toggleTask(id);
-    },
-    [toggleTask]
-  );
+  const handleToggleTask = useCallback((id) => toggleTask(id), [toggleTask]);
 
-  const handleCreateTask = useCallback(
-    async (e) => {
-      e.preventDefault();
-      const title = newTaskTitle.trim();
-      if (!title) return;
-      setIsCreating(true);
-      const result = await createTask(title);
-      setIsCreating(false);
-      if (result.success) {
-        setNewTaskTitle('');
-        setShowAddForm(false);
-      }
-    },
-    [newTaskTitle, createTask]
-  );
-
-  // Get weekly data for chart (last 7 days, chronological: oldest left, newest right)
-  const weeklyData = useMemo(() => {
-    const days = [];
-    const now = new Date();
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date(now);
-      d.setDate(d.getDate() - i);
-      const dateStr = d.toISOString().split('T')[0];
-      const dayData = stats?.weeklyData?.find((w) => w.date === dateStr);
-      days.push({
-        date: dateStr,
-        label: i === 0 ? 'Today' : d.toLocaleDateString('en-US', { weekday: 'short' }),
-        day: d.getDate(),
-        percentage: dayData?.percentage || 0,
-        completed: dayData?.completed || 0,
-        total: dayData?.total || 0,
-        isToday: i === 0,
-      });
+  const handleCreateTask = useCallback(async (e) => {
+    e.preventDefault();
+    const title = newTaskTitle.trim();
+    if (!title) return;
+    setIsCreating(true);
+    const result = await createTask(title);
+    setIsCreating(false);
+    if (result.success) {
+      setNewTaskTitle('');
+      setShowAddForm(false);
     }
-    return days;
-  }, [stats?.weeklyData]);
+  }, [newTaskTitle, createTask]);
 
-  // Chart colors based on theme
+  // Edit handlers
+  const handleStartEdit = useCallback((task) => {
+    setEditingTaskId(task.id);
+    setEditingTitle(task.title);
+  }, []);
+
+  const handleSaveEdit = useCallback(async (taskId) => {
+    if (!editingTitle.trim()) return;
+    await updateTask(taskId, editingTitle.trim());
+    setEditingTaskId(null);
+    setEditingTitle('');
+  }, [editingTitle, updateTask]);
+
+  const handleCancelEdit = useCallback(() => {
+    setEditingTaskId(null);
+    setEditingTitle('');
+  }, []);
+
+  // Delete handlers
+  const handleDeleteConfirm = useCallback(async (taskId) => {
+    await deleteTask(taskId);
+    setDeleteConfirmId(null);
+  }, [deleteTask]);
+
+  // Handle resize
+  useEffect(() => {
+    const handleResize = () => setDayCount(getDayCount());
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  // Move up/down - use queryClient ref
+  const handleMoveTask = useCallback(async (taskId, direction, currentIndex) => {
+    const swapIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+    if (swapIndex < 0 || swapIndex >= tasks.length) return;
+    try {
+      await tasksAPI.swapOrder(taskId, tasks[swapIndex].id);
+      // Simple page reload to re-fetch with new order
+      window.location.reload();
+    } catch { toast.error('Failed to reorder'); }
+  }, [tasks]);
+
+  // ── Weekly data for chart (from dashboard stats) ──
+  const weeklyData = useMemo(() => {
+    return recentDays.map(d => {
+      // For today, use real task data. For past days, use stats if available
+      const isToday = d.isToday;
+      const completed = isToday ? tasks.filter(t => t.completed_today).length : (stats?.weeklyData?.find(w => w.date === d.date)?.completed || 0);
+      const total = tasks.length || stats?.totalTasks || 1;
+      const percentage = isToday
+        ? (total > 0 ? Math.round((completed / total) * 100) : 0)
+        : (stats?.weeklyData?.find(w => w.date === d.date)?.percentage || 0);
+      return { date: d.date, label: d.label, day: d.day, percentage, completed, total, isToday };
+    });
+  }, [recentDays, tasks, stats]);
+
+  // ── Chart colors ──────────────────────────────────────────────────
   const chartColors = useMemo(() => {
     const isDark = theme === 'dark' || theme === 'navy';
     return {
@@ -133,693 +180,427 @@ export default function Dashboard() {
     };
   }, [theme]);
 
-  const chartData = useMemo(
-    () => ({
-      labels: weeklyData.map((d) => d.label),
-      datasets: [
-        {
-          label: 'Completion %',
-          data: weeklyData.map((d) => d.percentage),
-          fill: true,
-          borderColor: chartColors.border,
-          backgroundColor: chartColors.fill,
-          tension: 0.4,
-          pointBackgroundColor: weeklyData.map((d) => (d.isToday ? chartColors.warning : chartColors.point)),
-          pointBorderColor: chartColors.tooltipBg,
-          pointBorderWidth: 2,
-          pointRadius: weeklyData.map((d) => (d.isToday ? 5 : 3)),
-          pointHoverRadius: 7,
-          borderWidth: 2.5,
-        },
-        {
-          label: 'Tasks Completed',
-          data: weeklyData.map((d) => d.completed),
-          fill: false,
-          borderColor: chartColors.success,
-          backgroundColor: chartColors.success,
-          tension: 0.4,
-          pointBackgroundColor: chartColors.success,
-          pointBorderColor: chartColors.tooltipBg,
-          pointBorderWidth: 2,
-          pointRadius: 3,
-          pointHoverRadius: 6,
-          borderWidth: 2,
-          borderDash: [5, 5],
-          yAxisID: 'y1',
-        },
-      ],
-    }),
-    [weeklyData, chartColors]
-  );
-
-  const chartOptions = useMemo(
-    () => ({
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: { duration: 750, easing: 'easeOutQuart' },
-      plugins: {
-        legend: {
-          display: true,
-          position: 'top',
-          labels: {
-            color: chartColors.tick,
-            font: { size: 11, family: 'Inter, sans-serif' },
-            usePointStyle: true,
-            padding: 16,
-          },
-        },
-        title: { display: false },
-        tooltip: {
-          backgroundColor: chartColors.tooltipBg,
-          titleColor: chartColors.titleColor,
-          bodyColor: chartColors.bodyColor,
-          borderColor: chartColors.tooltipBorder,
-          borderWidth: 1,
-          padding: 12,
-          cornerRadius: 10,
-          displayColors: true,
-          callbacks: {
-            label: (ctx) =>
-              ctx.datasetIndex === 0
-                ? `${ctx.parsed.y}% completion`
-                : `${ctx.parsed.y} tasks completed`,
-            title: (ctx) => ctx[0].label,
-          },
-        },
+  const chartData = useMemo(() => ({
+    labels: weeklyData.map(d => d.label),
+    datasets: [
+      {
+        label: 'Completion %',
+        data: weeklyData.map(d => d.percentage),
+        fill: true,
+        borderColor: chartColors.border,
+        backgroundColor: chartColors.fill,
+        tension: 0.4,
+        pointBackgroundColor: weeklyData.map(d => d.isToday ? chartColors.warning : chartColors.point),
+        pointBorderColor: chartColors.tooltipBg,
+        pointBorderWidth: 2,
+        pointRadius: weeklyData.map(d => d.isToday ? 5 : 3),
+        pointHoverRadius: 7,
+        borderWidth: 2.5,
       },
-      scales: {
-        x: { grid: { display: false }, ticks: { color: chartColors.tick, font: { size: 11 } } },
-        y: {
-          type: 'linear',
-          display: true,
-          position: 'left',
-          min: 0,
-          max: 100,
-          grid: { color: chartColors.grid, drawBorder: false },
-          ticks: { color: chartColors.tick, font: { size: 11 }, callback: (v) => `${v}%` },
-          title: { display: true, text: 'Completion %', color: chartColors.tick, font: { size: 10 } },
-        },
-        y1: {
-          type: 'linear',
-          display: true,
-          position: 'right',
-          min: 0,
-          grid: { drawOnChartArea: false },
-          ticks: { color: chartColors.success, font: { size: 11 } },
-          title: { display: true, text: 'Tasks', color: chartColors.success, font: { size: 10 } },
-        },
+      {
+        label: 'Tasks Completed',
+        data: weeklyData.map(d => d.completed),
+        fill: false,
+        borderColor: chartColors.success,
+        backgroundColor: chartColors.success,
+        tension: 0.4,
+        pointBackgroundColor: chartColors.success,
+        pointBorderColor: chartColors.tooltipBg,
+        pointBorderWidth: 2,
+        pointRadius: 3,
+        pointHoverRadius: 6,
+        borderWidth: 2,
+        borderDash: [5, 5],
+        yAxisID: 'y1',
       },
-      interaction: { intersect: false, mode: 'index' },
-    }),
-    [chartColors]
-  );
+    ],
+  }), [weeklyData, chartColors]);
 
-  // Recent days for quick check-in
-  const recentDays = useMemo(() => {
-    const days = [];
-    const now = new Date();
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date(now);
-      d.setDate(d.getDate() - i);
-      days.push({
-        date: d.toISOString().split('T')[0],
-        label:
-          i === 0
-            ? 'Today'
-            : i === 1
-            ? 'Yesterday'
-            : d.toLocaleDateString('en-US', { weekday: 'short' }),
-        day: d.getDate(),
-        dayName: d.toLocaleDateString('en-US', { weekday: 'short' }),
-        isToday: i === 0,
-      });
-    }
-    return days;
-  }, []);
+  const chartOptions = useMemo(() => ({
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 500, easing: 'easeOutQuart' },
+    plugins: {
+      legend: { display: true, position: 'top', labels: { color: chartColors.tick, font: { size: 10, family: 'Inter, sans-serif' }, usePointStyle: true, padding: 12 } },
+      tooltip: {
+        backgroundColor: chartColors.tooltipBg,
+        titleColor: chartColors.titleColor,
+        bodyColor: chartColors.bodyColor,
+        borderColor: chartColors.tooltipBorder,
+        borderWidth: 1, padding: 10, cornerRadius: 8,
+        callbacks: { label: (ctx) => ctx.datasetIndex === 0 ? `${ctx.parsed.y}%` : `${ctx.parsed.y} tasks` },
+      },
+    },
+    scales: {
+      x: { grid: { display: false }, ticks: { color: chartColors.tick, font: { size: 10 } } },
+      y: { type: 'linear', display: true, position: 'left', min: 0, max: 100, grid: { color: chartColors.grid, drawBorder: false }, ticks: { color: chartColors.tick, font: { size: 10 }, callback: (v) => `${v}%` } },
+      y1: { type: 'linear', display: true, position: 'right', min: 0, grid: { drawOnChartArea: false }, ticks: { color: chartColors.success, font: { size: 10 } } },
+    },
+    interaction: { intersect: false, mode: 'index' },
+  }), [chartColors]);
 
   if (showInitialSkeleton) return <DashboardSkeleton />;
 
-  const completedToday = stats?.completedToday || tasks.filter((t) => t.completed_today).length;
-  const totalTasks = stats?.totalTasks || tasks.length;
-  const completionRate =
-    stats?.completionPercent ??
-    (totalTasks > 0 ? Math.round((completedToday / totalTasks) * 100) : 0);
+  const completedToday = tasks.filter(t => t.completed_today).length;
+  const totalTasks = tasks.length;
+  const completionRate = totalTasks > 0 ? Math.round((completedToday / totalTasks) * 100) : 0;
   const currentStreak = stats?.currentStreak || 0;
   const longestStreak = stats?.longestStreak || 0;
 
   return (
-    <div className="space-y-4 animate-fade-in">
-      {/* SECTION 1: Greeting Header */}
+    <div className="space-y-3 animate-fade-in" ref={containerRef}>
+      {/* ═══ SECTION 1: Greeting + Mini Stats ═══ */}
       <div
-        className="rounded-xl p-4 md:p-6 card-hover"
+        className="rounded-xl p-3 md:p-4 card-hover"
         style={{ backgroundColor: 'var(--card-bg)', border: '1px solid var(--border-color)' }}
       >
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-          <div>
-            <h1 className="text-xl md:text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <h1 className="text-base md:text-lg font-bold truncate" style={{ color: 'var(--text-primary)' }}>
               {greeting}, {user?.name?.split(' ')[0] || 'User'} 👋
             </h1>
-            <p className="text-sm mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-              {today}
-            </p>
+            <p className="text-[11px] mt-0.5 truncate" style={{ color: 'var(--text-secondary)' }}>{today}</p>
           </div>
-          <div className="flex items-center gap-3 flex-wrap">
-            <StreakBadge label="🔥" value={`${currentStreak}d`} />
-            <ProgressPill value={`${completionRate}%`} />
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <span className="text-xs px-2 py-1 rounded-md font-semibold" style={{ backgroundColor: 'var(--bg-secondary)', color: 'var(--text-primary)' }}>
+              🔥 {currentStreak}d
+            </span>
+            <span className="text-xs px-2 py-1 rounded-md font-semibold text-white" style={{ backgroundColor: 'var(--accent)' }}>
+              {completionRate}%
+            </span>
           </div>
         </div>
-        <div
-          className="mt-3 h-1.5 rounded-full overflow-hidden"
-          style={{ backgroundColor: 'var(--bg-secondary)' }}
-        >
-          <div
-            className="h-full rounded-full transition-all duration-700 ease-out"
-            style={{ width: `${completionRate}%`, backgroundColor: 'var(--accent)' }}
-          />
+        <div className="mt-2 h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: 'var(--bg-secondary)' }}>
+          <div className="h-full rounded-full transition-all duration-500 ease-out" style={{ width: `${completionRate}%`, backgroundColor: 'var(--accent)' }} />
         </div>
       </div>
 
-      {/* SECTION 2: Quick Daily Check-in */}
+      {/* ═══ SECTION 2: Daily Check-in Board ═══ */}
       <div
-        className="rounded-xl p-4 card-hover"
+        className="rounded-xl card-hover overflow-hidden"
         style={{ backgroundColor: 'var(--card-bg)', border: '1px solid var(--border-color)' }}
       >
-        <h2 className="text-sm font-semibold mb-3" style={{ color: 'var(--text-secondary)' }}>
-          Weekly Check-in
-        </h2>
-        <div className="checkin-scroll">
-          <QuickCheckinTable
+        {tasks.length === 0 ? (
+          <div className="text-center py-8">
+            <Target size={32} className="mx-auto mb-2" style={{ color: 'var(--text-muted)' }} />
+            <p className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>No tasks yet</p>
+            <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>Tap + to add your first task</p>
+          </div>
+        ) : (
+          <CheckinBoard
             tasks={tasks}
             recentDays={recentDays}
             onToggle={handleToggleTask}
             togglingId={togglingId}
+            editingTaskId={editingTaskId}
+            editingTitle={editingTitle}
+            onStartEdit={handleStartEdit}
+            onSaveEdit={handleSaveEdit}
+            onCancelEdit={handleCancelEdit}
+            onDeleteRequest={setDeleteConfirmId}
+            deleteConfirmId={deleteConfirmId}
+            onDeleteConfirm={handleDeleteConfirm}
+            onCancelDelete={() => setDeleteConfirmId(null)}
+            onMoveTask={handleMoveTask}
           />
-        </div>
+        )}
       </div>
 
-      {/* SECTION 3: Mini Progress Summary */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <MiniCard
-          icon={CheckCircle}
-          label="Completed"
-          value={`${completedToday}`}
-          sub={totalTasks > 0 ? `of ${totalTasks} tasks` : 'No tasks'}
-          accent="var(--success)"
-        />
-        <MiniCard icon={Target} label="Rate" value={`${completionRate}%`} sub="Today" accent="var(--accent)" />
-        <MiniCard
-          icon={Flame}
-          label="Streak"
-          value={`${currentStreak}d`}
-          sub={currentStreak > 0 ? 'Keep going!' : 'Start today'}
-          accent="var(--warning)"
-        />
-        <MiniCard
-          icon={Trophy}
-          label="Best"
-          value={`${longestStreak}d`}
-          sub="Longest streak"
-          accent="var(--success)"
-        />
+      {/* ═══ SECTION 3: Mini Progress Summary ═══ */}
+      <div className="grid grid-cols-4 gap-2">
+        <MiniCardSm icon={CheckCircle} label="Done" value={`${completedToday}`} accent="var(--success)" />
+        <MiniCardSm icon={Target} label="Rate" value={`${completionRate}%`} accent="var(--accent)" />
+        <MiniCardSm icon={Flame} label="Streak" value={`${currentStreak}d`} accent="var(--warning)" />
+        <MiniCardSm icon={Trophy} label="Best" value={`${longestStreak}d`} accent="var(--success)" />
       </div>
 
-      {/* SECTION 4: Analytics-Quality Graph */}
+      {/* ═══ SECTION 4: Weekly Graph ═══ */}
       <div
-        className="rounded-xl p-4 md:p-5 card-hover animate-slide-up"
+        className="rounded-xl p-3 md:p-4 card-hover"
         style={{ backgroundColor: 'var(--card-bg)', border: '1px solid var(--border-color)' }}
       >
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2">
-            <Activity size={16} style={{ color: 'var(--accent)' }} />
-            <span className="text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>
-              Weekly Productivity
-            </span>
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-1.5">
+            <Activity size={14} style={{ color: 'var(--accent)' }} />
+            <span className="text-xs font-semibold" style={{ color: 'var(--text-secondary)' }}>Weekly</span>
           </div>
-          <button
-            onClick={() => setShowGraph(!showGraph)}
-            className="p-1.5 rounded-lg transition-colors hover:bg-[var(--hover-bg)]"
-            style={{ color: 'var(--text-muted)' }}
-            aria-label={showGraph ? 'Hide chart' : 'Show chart'}
-            aria-expanded={showGraph}
-          >
-            {showGraph ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+          <button onClick={() => setShowGraph(!showGraph)} className="p-1 rounded hover:bg-[var(--hover-bg)]" style={{ color: 'var(--text-muted)' }}>
+            {showGraph ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
           </button>
         </div>
-
         {showGraph && (
-          <div className="chart-container" style={{ height: '220px' }}>
-            {weeklyData.some((d) => d.percentage > 0 || d.completed > 0) ? (
+          <div style={{ height: '140px' }}>
+            {weeklyData.some(d => d.percentage > 0 || d.completed > 0) ? (
               <Line data={chartData} options={chartOptions} />
             ) : (
-              <div className="flex items-center justify-center h-full">
-                <div className="text-center">
-                  <Activity size={32} className="mx-auto mb-2" style={{ color: 'var(--text-muted)' }} />
-                  <p className="text-sm" style={{ color: 'var(--text-muted)' }}>No data yet</p>
-                  <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
-                    Complete tasks to see your trend
-                  </p>
-                </div>
+              <div className="flex items-center justify-center h-full text-xs" style={{ color: 'var(--text-muted)' }}>
+                Complete tasks to see your trend
               </div>
             )}
           </div>
         )}
-
-        <div className="grid grid-cols-3 gap-3 mt-4 pt-4 border-t" style={{ borderColor: 'var(--border-color)' }}>
-          <WeeklyStat
-            label="Avg Completion"
-            value={`${Math.round(weeklyData.reduce((a, b) => a + b.percentage, 0) / 7)}%`}
-            icon={Target}
-            color="var(--accent)"
-          />
-          <WeeklyStat
-            label="Tasks Done"
-            value={weeklyData.reduce((a, b) => a + b.completed, 0)}
-            icon={CheckCircle}
-            color="var(--success)"
-          />
-          <WeeklyStat
-            label="Active Days"
-            value={weeklyData.filter((d) => d.percentage > 0).length}
-            icon={Calendar}
-            color="var(--warning)"
-          />
-        </div>
       </div>
 
-      {/* SECTION 5: Below-fold - Task Management */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
-        <h2 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>
-          All Tasks
-        </h2>
-        <div className="flex items-center gap-2">
-          <SearchInput value={searchTerm} onChange={setSearchTerm} />
-        </div>
-      </div>
-
-      <div className="space-y-2 pb-28">
-        {tasks.length === 0 ? (
-          <EmptyTasks />
-        ) : (
-          tasks.map((task) => (
-            <TaskRow
-              key={task.id}
-              task={task}
-              onToggle={handleToggleTask}
-              onDelete={deleteTask}
-              isToggling={togglingId === task.id}
+      {/* ═══ SECTION 5: Add Task Button & Form ═══ */}
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => setShowAddForm(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all hover:scale-105"
+          style={{ backgroundColor: 'var(--accent)', color: 'white' }}
+        >
+          <Plus size={14} />
+          Add Task
+        </button>
+        {showAddForm && (
+          <form onSubmit={handleCreateTask} className="flex-1 flex gap-1">
+            <input
+              type="text"
+              value={newTaskTitle}
+              onChange={(e) => setNewTaskTitle(e.target.value)}
+              placeholder="New task..."
+              className="flex-1 px-3 py-1.5 rounded-lg text-xs outline-none"
+              style={{ backgroundColor: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }}
+              autoFocus
+              onKeyDown={(e) => e.key === 'Escape' && (setShowAddForm(false), setNewTaskTitle(''))}
             />
-          ))
+            <button type="submit" disabled={isCreating || !newTaskTitle.trim()}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium text-white"
+              style={{ backgroundColor: newTaskTitle.trim() ? 'var(--accent)' : 'var(--text-muted)' }}>
+              {isCreating ? '...' : 'Add'}
+            </button>
+            <button type="button" onClick={() => { setShowAddForm(false); setNewTaskTitle(''); }}
+              className="px-2 py-1.5 rounded-lg text-xs" style={{ color: 'var(--text-muted)' }}>
+              <X size={14} />
+            </button>
+          </form>
         )}
       </div>
-
-      <FloatingAddButton onClick={() => setShowAddForm(true)} isOpen={showAddForm} />
-
-      {showAddForm && (
-        <AddTaskModal
-          value={newTaskTitle}
-          onChange={setNewTaskTitle}
-          onSubmit={handleCreateTask}
-          onClose={() => {
-            setShowAddForm(false);
-            setNewTaskTitle('');
-          }}
-          isCreating={isCreating}
-        />
-      )}
     </div>
   );
 }
 
-/* ── Sub-components ─────────────────────────────────────────────────────── */
-
-const QuickCheckinTable = memo(function QuickCheckinTable({ tasks, recentDays, onToggle, togglingId }) {
-  dlog('QuickCheckinTable render');
-  if (tasks.length === 0) {
-    return (
-      <p className="text-sm py-4 text-center" style={{ color: 'var(--text-muted)' }}>
-        Add tasks to get started
-      </p>
-    );
-  }
+/* ══════════════════════════════════════════════════════════════════════
+   Check-in Board (the main table component)
+   ══════════════════════════════════════════════════════════════════════ */
+const CheckinBoard = memo(function CheckinBoard({
+  tasks, recentDays, onToggle, togglingId,
+  editingTaskId, editingTitle, onStartEdit, onSaveEdit, onCancelEdit,
+  onDeleteRequest, deleteConfirmId, onDeleteConfirm, onCancelDelete, onMoveTask
+}) {
+  dlog('CheckinBoard render');
+  const scrollRef = useRef(null);
 
   return (
-    <table className="w-full min-w-[500px] md:min-w-[700px]">
-      <thead>
-        <tr>
-          <th
-            className="text-left text-xs font-medium py-2 pr-4 sticky left-0"
-            style={{ color: 'var(--text-muted)', backgroundColor: 'var(--card-bg)' }}
-          >
-            Task
-          </th>
-          {recentDays.map((d) => (
-            <th
-              key={d.date}
-              className="text-center text-xs font-medium py-2 px-2 w-10 relative"
-              style={{ color: 'var(--text-muted)' }}
-            >
-              <div className="font-medium">{d.dayName}</div>
-              <div className="text-[10px] opacity-60">{d.day}</div>
-              {d.isToday && (
-                <div
-                  className="absolute bottom-0 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full"
-                  style={{ backgroundColor: 'var(--accent)' }}
-                />
-              )}
+    <div className="checkin-board-scroll" ref={scrollRef}>
+      <table className="checkin-board-table">
+        <thead>
+          <tr>
+            <th className="checkin-board-th checkin-task-col">
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>Tasks</span>
+              </div>
             </th>
+            {recentDays.map((d) => (
+              <th key={d.date} className={`checkin-board-th checkin-day-col ${d.isToday ? 'is-today' : ''}`}>
+                {/* TODAY INDICATOR - topmost */}
+                {d.isToday && <span className="checkin-today-badge">TODAY</span>}
+                {/* Day name */}
+                <span className="checkin-day-name">{d.dayName}</span>
+                {/* Date number */}
+                <span className="checkin-date-num">{d.day}</span>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {tasks.map((task, idx) => (
+            <CheckinRow
+              key={task.id}
+              task={task}
+              recentDays={recentDays}
+              onToggle={onToggle}
+              isToggling={togglingId === task.id}
+              isEditing={editingTaskId === task.id}
+              editingTitle={editingTitle}
+              onStartEdit={() => onStartEdit(task)}
+              onSaveEdit={() => onSaveEdit(task.id)}
+              onCancelEdit={onCancelEdit}
+              onDeleteRequest={() => onDeleteRequest(task.id)}
+              isDeleteConfirm={deleteConfirmId === task.id}
+              onDeleteConfirm={() => onDeleteConfirm(task.id)}
+              onCancelDelete={onCancelDelete}
+              onMoveUp={idx > 0 ? () => onMoveTask(task.id, 'up', idx) : null}
+              onMoveDown={idx < tasks.length - 1 ? () => onMoveTask(task.id, 'down', idx) : null}
+            />
           ))}
-        </tr>
-      </thead>
-      <tbody>
-        {tasks.map((task) => {
-          const isCompletedToday = task.completed_today;
-          const isToggling = togglingId === task.id;
-          return (
-            <tr key={task.id} className="border-t" style={{ borderColor: 'var(--border-color)' }}>
-              <td
-                className="py-2 pr-4 text-sm truncate max-w-[160px] sticky left-0"
-                style={{ color: 'var(--text-primary)', backgroundColor: 'var(--card-bg)' }}
-              >
-                {task.title}
-              </td>
-              {recentDays.map((d, idx) => (
-                <td key={d.date} className="text-center py-1 px-2">
-                  {idx === 0 ? (
-                    <ToggleButton
-                      checked={isCompletedToday}
-                      onClick={() => onToggle(task.id)}
-                      isToggling={isToggling}
-                    />
-                  ) : (
-                    <span
-                      className="inline-block w-5 h-5 rounded-full text-[10px] leading-5"
-                      style={{ backgroundColor: 'var(--bg-secondary)', color: 'var(--text-muted)' }}
-                    >
-                      -
-                    </span>
-                  )}
-                </td>
-              ))}
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+        </tbody>
+      </table>
+    </div>
   );
 });
 
-const ToggleButton = memo(function ToggleButton({ checked, onClick, isToggling }) {
-  dlog('ToggleButton render', { checked, isToggling });
+/* ══════════════════════════════════════════════════════════════════════
+   Check-in Row (memoized to only rerender when its own task changes)
+   ══════════════════════════════════════════════════════════════════════ */
+const CheckinRow = memo(function CheckinRow({
+  task, recentDays, onToggle, isToggling,
+  isEditing, editingTitle, onStartEdit, onSaveEdit, onCancelEdit,
+  onDeleteRequest, isDeleteConfirm, onDeleteConfirm, onCancelDelete,
+  onMoveUp, onMoveDown
+}) {
+  dlog('CheckinRow render', task.id);
+  const [editValue, setEditValue] = useState(task.title);
+
+  // Sync editValue when editing starts
+  useEffect(() => {
+    if (isEditing) setEditValue(task.title);
+  }, [isEditing, task.title]);
+
+  return (
+    <tr className="checkin-board-tr" style={{ borderTop: '1px solid var(--border-color)' }}>
+      {/* Task name cell - sticky left */}
+      <td className="checkin-board-td checkin-task-col">
+        <div className="flex items-center gap-1">
+          {/* Reorder buttons */}
+          <div className="checkin-reorder-group">
+            <button onClick={onMoveUp} disabled={!onMoveUp}
+              className="checkin-reorder-btn" style={{ opacity: onMoveUp ? 1 : 0.2 }}>
+              <ChevronUp size={10} />
+            </button>
+            <button onClick={onMoveDown} disabled={!onMoveDown}
+              className="checkin-reorder-btn" style={{ opacity: onMoveDown ? 1 : 0.2 }}>
+              <ChevronDown size={10} />
+            </button>
+          </div>
+
+          {isEditing ? (
+            <div className="flex items-center gap-1 flex-1 min-w-0">
+              <input
+                type="text"
+                value={editValue}
+                onChange={(e) => setEditValue(e.target.value)}
+                className="flex-1 px-1.5 py-0.5 rounded text-xs outline-none min-w-0"
+                style={{ backgroundColor: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--accent)' }}
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') onSaveEdit();
+                  if (e.key === 'Escape') onCancelEdit();
+                }}
+              />
+              <button onClick={() => { if (editValue.trim()) onSaveEdit(); }}
+                className="p-0.5 rounded hover:bg-[var(--hover-bg)]" style={{ color: 'var(--success)' }}>
+                <Check size={12} />
+              </button>
+              <button onClick={onCancelEdit} className="p-0.5 rounded hover:bg-[var(--hover-bg)]" style={{ color: 'var(--danger)' }}>
+                <X size={12} />
+              </button>
+            </div>
+          ) : (
+            <>
+              <span className="checkin-task-title" onClick={onStartEdit} title={task.title}>{task.title}</span>
+              <div className="checkin-task-actions">
+                <button onClick={onStartEdit} className="checkin-action-btn" aria-label="Edit">
+                  <Edit2 size={10} />
+                </button>
+                {isDeleteConfirm ? (
+                  <span className="flex items-center gap-0.5">
+                    <button onClick={onDeleteConfirm} className="checkin-action-btn" style={{ color: 'var(--danger)' }}>
+                      <Check size={10} />
+                    </button>
+                    <button onClick={onCancelDelete} className="checkin-action-btn">
+                      <X size={10} />
+                    </button>
+                  </span>
+                ) : (
+                  <button onClick={onDeleteRequest} className="checkin-action-btn" aria-label="Delete">
+                    <Trash2 size={10} />
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </td>
+
+      {/* Day cells */}
+      {recentDays.map((d) => (
+        <td key={d.date} className={`checkin-board-td checkin-day-col ${d.isToday ? 'is-today' : ''}`}>
+          <CheckinCell
+            checked={d.isToday ? task.completed_today : false}
+            onClick={() => d.isToday ? onToggle(task.id) : null}
+            isToggling={isToggling && d.isToday}
+          />
+        </td>
+      ))}
+    </tr>
+  );
+// Custom comparison - recentDays is always same reference within a render cycle
+}, (prev, next) =>
+  prev.task.id === next.task.id &&
+  prev.task.title === next.task.title &&
+  prev.task.completed_today === next.task.completed_today &&
+  prev.isToggling === next.isToggling &&
+  prev.isEditing === next.isEditing &&
+  prev.isDeleteConfirm === next.isDeleteConfirm
+);
+
+/* ══════════════════════════════════════════════════════════════════════
+   Check-in Cell (checkbox)
+   ══════════════════════════════════════════════════════════════════════ */
+const CheckinCell = memo(function CheckinCell({ checked, onClick, isToggling }) {
+  dlog('CheckinCell render', { checked, isToggling });
   return (
     <button
       onClick={onClick}
-      disabled={isToggling}
-      className="inline-flex items-center justify-center w-6 h-6 rounded-full transition-all duration-200 focus-visible:outline-2 focus-visible:outline-offset-2"
-      style={{
-        outlineColor: 'var(--accent)',
-        transform: 'scale(1)',
-      }}
-      aria-label={checked ? 'Mark as incomplete' : 'Mark as complete'}
+      disabled={!onClick}
+      className="checkin-cell-btn"
+      aria-label={checked ? 'Completed' : 'Not completed'}
       aria-pressed={checked}
     >
       {checked ? (
-        <CheckCircle size={20} style={{ color: 'var(--success)' }} className={isToggling ? 'animate-spin' : ''} />
+        <CheckCircle size={16} className={`checkin-check-icon ${isToggling ? 'animate-pulse' : ''}`} style={{ color: 'var(--success)' }} />
       ) : (
-        <Circle size={20} style={{ color: 'var(--text-muted)' }} />
+        <Circle size={16} style={{ color: 'var(--text-muted)' }} />
       )}
     </button>
   );
 });
 
-const MiniCard = memo(function MiniCard({ icon: Icon, label, value, sub, accent }) {
-  dlog('MiniCard render', label);
+/* ══════════════════════════════════════════════════════════════════════
+   Mini Stats Card
+   ══════════════════════════════════════════════════════════════════════ */
+const MiniCardSm = memo(function MiniCardSm({ icon: Icon, label, value, accent }) {
   return (
-    <div
-      className="rounded-xl p-3 md:p-4 card-hover"
-      style={{ backgroundColor: 'var(--card-bg)', border: '1px solid var(--border-color)' }}
-    >
-      <div className="flex items-center gap-2 mb-1.5">
-        <Icon size={14} style={{ color: accent }} />
-        <span className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>
-          {label}
-        </span>
+    <div className="rounded-lg p-2 text-center card-hover" style={{ backgroundColor: 'var(--card-bg)', border: '1px solid var(--border-color)' }}>
+      <div className="flex items-center justify-center gap-1 mb-0.5">
+        <Icon size={10} style={{ color: accent }} />
+        <span className="text-[9px] font-medium" style={{ color: 'var(--text-muted)' }}>{label}</span>
       </div>
-      <p className="text-lg md:text-xl font-bold" style={{ color: 'var(--text-primary)' }}>
-        {value}
-      </p>
-      <p className="text-[10px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
-        {sub}
-      </p>
+      <p className="text-sm font-bold" style={{ color: 'var(--text-primary)' }}>{value}</p>
     </div>
   );
 });
 
-const StreakBadge = memo(function StreakBadge({ label, value }) {
-  dlog('StreakBadge render');
-  return (
-    <div
-      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm"
-      style={{ backgroundColor: 'var(--bg-secondary)' }}
-    >
-      <span>{label}</span>
-      <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>
-        {value}
-      </span>
-    </div>
-  );
-});
-
-const ProgressPill = memo(function ProgressPill({ value }) {
-  dlog('ProgressPill render');
-  return (
-    <div
-      className="px-3 py-1.5 rounded-lg text-sm font-medium"
-      style={{ backgroundColor: 'var(--accent)', color: 'white' }}
-    >
-      {value}
-    </div>
-  );
-});
-
-const SearchInput = memo(function SearchInput({ value, onChange }) {
-  dlog('SearchInput render');
-  return (
-    <div className="relative">
-      <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-muted)' }} />
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder="Search..."
-        className="pl-8 pr-3 py-1.5 rounded-lg text-sm outline-none w-32 md:w-40 transition-all duration-200"
-        style={{
-          backgroundColor: 'var(--card-bg)',
-          color: 'var(--text-primary)',
-          border: '1px solid var(--border-color)',
-        }}
-        aria-label="Search tasks"
-      />
-    </div>
-  );
-});
-
-// TaskRow is the most performance-critical sub-component. It must
-// rerender ONLY when the single task it represents changes.
-const TaskRow = memo(
-  function TaskRow({ task, onToggle, onDelete, isToggling }) {
-    console.log('TaskRow render', task.id);
-    const [deleting, setDeleting] = useState(false);
-
-    const handleDelete = useCallback(async () => {
-      if (deleting) return;
-      setDeleting(true);
-      await onDelete(task.id);
-      setDeleting(false);
-    }, [deleting, onDelete, task.id]);
-
-    const handleToggle = useCallback(() => onToggle(task.id), [onToggle, task.id]);
-
-    return (
-      <div
-        className="flex items-center gap-3 p-3 rounded-lg card-hover"
-        style={{ backgroundColor: 'var(--card-bg)', border: '1px solid var(--border-color)' }}
-      >
-        <button
-          onClick={handleToggle}
-          disabled={isToggling}
-          className="flex-shrink-0 transition-transform hover:scale-110"
-          aria-label={task.completed_today ? 'Mark incomplete' : 'Mark complete'}
-          style={{ opacity: isToggling ? 0.7 : 1 }}
-        >
-          {task.completed_today ? (
-            <CheckCircle size={20} style={{ color: 'var(--success)' }} className={isToggling ? 'animate-pulse' : ''} />
-          ) : (
-            <Circle size={20} style={{ color: 'var(--text-muted)' }} />
-          )}
-        </button>
-        <div className="flex-1 min-w-0">
-          <p
-            className="text-sm font-medium truncate"
-            style={{
-              color: 'var(--text-primary)',
-              textDecoration: task.completed_today ? 'line-through' : 'none',
-              opacity: task.completed_today ? 0.6 : 1,
-            }}
-          >
-            {task.title}
-          </p>
-        </div>
-        <button
-          onClick={handleDelete}
-          disabled={deleting}
-          className="p-1.5 rounded-lg transition-colors hover:scale-110"
-          style={{ color: 'var(--text-muted)' }}
-          aria-label="Delete task"
-        >
-          <X size={14} />
-        </button>
-      </div>
-    );
-  },
-  // Custom equality: only re-render when this task's own state changes
-  // OR when its toggling flag flips. The other task rows are untouched.
-  (prev, next) =>
-    prev.task.id === next.task.id &&
-    prev.task.title === next.task.title &&
-    prev.task.completed_today === next.task.completed_today &&
-    prev.isToggling === next.isToggling &&
-    prev.onToggle === next.onToggle &&
-    prev.onDelete === next.onDelete
-);
-
-const WeeklyStat = memo(function WeeklyStat({ label, value, icon: Icon, color }) {
-  dlog('WeeklyStat render', label);
-  return (
-    <div className="text-center p-3 rounded-lg" style={{ backgroundColor: 'var(--bg-secondary)' }}>
-      <Icon size={16} className="mx-auto mb-1" style={{ color }} />
-      <p className="text-lg font-bold" style={{ color: 'var(--text-primary)' }}>
-        {value}
-      </p>
-      <p className="text-[10px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
-        {label}
-      </p>
-    </div>
-  );
-});
-
-const FloatingAddButton = memo(function FloatingAddButton({ onClick, isOpen }) {
-  dlog('FloatingAddButton render');
-  return (
-    <button
-      onClick={onClick}
-      className={`fab ${isOpen ? 'open' : ''}`}
-      aria-label="Add new task"
-      title="Add new task"
-    >
-      <Plus size={24} />
-    </button>
-  );
-});
-
-const AddTaskModal = memo(function AddTaskModal({ value, onChange, onSubmit, onClose, isCreating }) {
-  dlog('AddTaskModal render');
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 animate-fade-in"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-sm rounded-xl p-5 animate-scale-in shadow-xl"
-        style={{ backgroundColor: 'var(--card-bg)', border: '1px solid var(--border-color)' }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h3 className="text-base font-semibold mb-3" style={{ color: 'var(--text-primary)' }}>
-          New Task
-        </h3>
-        <form onSubmit={onSubmit}>
-          <input
-            type="text"
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
-            placeholder="What do you want to do?"
-            className="w-full px-4 py-2.5 rounded-lg text-sm outline-none mb-3"
-            style={{
-              backgroundColor: 'var(--bg-secondary)',
-              color: 'var(--text-primary)',
-              border: '1px solid var(--border-color)',
-            }}
-            autoFocus
-            aria-label="New task title"
-          />
-          <div className="flex gap-2 justify-end">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 rounded-lg text-sm font-medium transition-colors hover:bg-[var(--hover-bg)]"
-              style={{ color: 'var(--text-secondary)' }}
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={isCreating || !value.trim()}
-              className="px-5 py-2 rounded-lg text-sm font-medium text-white transition-all"
-              style={{
-                backgroundColor: !isCreating && value.trim() ? 'var(--accent)' : 'var(--text-muted)',
-              }}
-            >
-              {isCreating ? 'Adding...' : 'Add Task'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-});
-
-/* ── Skeleton Loader ────────────────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════════════
+   Skeleton Loader
+   ══════════════════════════════════════════════════════════════════════ */
 function DashboardSkeleton() {
-  dlog('DashboardSkeleton render');
   return (
-    <div className="space-y-4 animate-fade-in">
-      <div className="rounded-xl p-4 md:p-6" style={{ backgroundColor: 'var(--card-bg)', border: '1px solid var(--border-color)' }}>
+    <div className="space-y-3 animate-fade-in">
+      <div className="rounded-xl p-4" style={{ backgroundColor: 'var(--card-bg)', border: '1px solid var(--border-color)' }}>
         <div className="skeleton skeleton-text-lg w-2/3" />
-        <div className="skeleton skeleton-text w-1/3 mt-2" />
-        <div className="skeleton h-2 w-full mt-3 rounded-full" style={{ backgroundColor: 'var(--bg-secondary)' }} />
+        <div className="skeleton skeleton-text w-1/3 mt-1" />
+        <div className="skeleton h-2 w-full mt-2 rounded-full" style={{ backgroundColor: 'var(--bg-secondary)' }} />
+      </div>
+      <div className="rounded-xl" style={{ backgroundColor: 'var(--card-bg)', border: '1px solid var(--border-color)' }}>
+        <div className="skeleton h-32 w-full" />
+      </div>
+      <div className="grid grid-cols-4 gap-2">
+        {[1,2,3,4].map(i => <div key={i} className="skeleton skeleton-card rounded-lg" />)}
       </div>
       <div className="rounded-xl p-4" style={{ backgroundColor: 'var(--card-bg)', border: '1px solid var(--border-color)' }}>
-        <div className="skeleton skeleton-text w-1/3 mb-3" />
-        <div className="skeleton h-16 w-full" />
+        <div className="skeleton h-24 w-full" />
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        {[1, 2, 3, 4].map((i) => (
-          <div key={i} className="skeleton skeleton-card rounded-xl" />
-        ))}
-      </div>
-      <div className="rounded-xl p-4 md:p-5" style={{ backgroundColor: 'var(--card-bg)', border: '1px solid var(--border-color)' }}>
-        <div className="skeleton h-8 w-1/4 mb-4" />
-        <div className="skeleton h-48 w-full" />
-        <div className="skeleton h-20 w-full mt-4" />
-      </div>
-      <div className="skeleton skeleton-text w-1/4" />
-      {[1, 2, 3].map((i) => (
-        <div key={i} className="skeleton h-12 w-full rounded-lg" />
-      ))}
-    </div>
-  );
-}
-
-function EmptyTasks() {
-  dlog('EmptyTasks render');
-  return (
-    <div className="empty-state">
-      <Target size={40} style={{ color: 'var(--text-muted)' }} />
-      <h3 className="text-base font-medium mt-3" style={{ color: 'var(--text-primary)' }}>
-        No tasks yet
-      </h3>
-      <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)' }}>
-        Tap the + button to add your first task
-      </p>
     </div>
   );
 }

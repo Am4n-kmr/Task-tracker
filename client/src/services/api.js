@@ -50,6 +50,9 @@ export const tasksAPI = {
     params: { year, month },
     responseType: 'blob'
   }),
+  reorder: (id, newOrder) => api.put(`/tasks/${id}/reorder`, { newOrder }),
+  swapOrder: (taskId1, taskId2) => api.put('/tasks/swap-order', { taskId1, taskId2 }),
+  toggleByDate: (id, date) => api.post(`/tasks/${id}/toggle-by-date`, { date }),
 };
 
 export default api;

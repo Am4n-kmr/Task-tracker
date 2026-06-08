@@ -9,16 +9,9 @@ import { queryKeys } from './queryKeys';
  * Owns the canonical cache for the user's task list and exposes
  * a fully optimistic toggle/create/update/delete mutation set.
  *
- * Why React Query here?
- *  - The previous implementation bumped a global `version` counter on every
- *    toggle, which caused `useDashboard`, `useHeatmap`, `useAnalytics` and
- *    `useMonthlyData` to re-run their `useEffect` and refetch from the
- *    server. While that refetch was in flight, `loading` flipped back to
- *    `true` and the entire <Dashboard> unmounted in favor of a skeleton —
- *    producing the flicker described in the bug report.
- *  - React Query isolates the cache per key, gives us `onMutate` /
- *    `onError` / `onSettled` lifecycle hooks, and lets us update a SINGLE
- *    task row in place without touching any other query.
+ * CRITICAL: On toggle, this hook now updates ALL dependent query caches
+ * (dashboard, heatmap, analytics, monthly) so that every page stays
+ * in sync WITHOUT refetches or flicker.
  * ────────────────────────────────────────────────────────────────────── */
 
 export function useTasks(searchTerm) {
@@ -35,8 +28,6 @@ export function useTasks(searchTerm) {
       const res = await tasksAPI.getAll(searchTerm || undefined);
       return res.data.data;
     },
-    // The data is "fresh" long enough that toggling a task does not
-    // require a refetch of the list itself.
     staleTime: 1000 * 60 * 2,
   });
 
@@ -49,7 +40,6 @@ export function useTasks(searchTerm) {
     onMutate: async (title) => {
       await queryClient.cancelQueries({ queryKey: queryKeys.tasks(searchTerm) });
       const previous = queryClient.getQueryData(queryKeys.tasks(searchTerm));
-      // Optimistic placeholder so the row shows up immediately.
       const optimistic = {
         id: `temp-${Date.now()}`,
         title,
@@ -70,13 +60,9 @@ export function useTasks(searchTerm) {
         old.map((t) => (t._optimistic ? serverTask : t))
       );
       toast.success('Task created!');
-      // Invalidate ONLY the summary queries that genuinely depend on
-      // the task count. We DO NOT refetch the tasks list itself.
       queryClient.invalidateQueries({ queryKey: queryKeys.dashboard() });
     },
     onSettled: () => {
-      // Reconcile with the server in the background; this is a soft
-      // refetch that does not block the UI.
       queryClient.invalidateQueries({ queryKey: queryKeys.tasks(searchTerm) });
     },
   });
@@ -144,26 +130,24 @@ export function useTasks(searchTerm) {
       const res = await tasksAPI.toggle(id);
       return res.data.data; // { id, completed }
     },
-    // BEFORE the request fires, mutate the cache in place for the single
-    // affected task. Nothing else in the tree is touched.
     onMutate: async (id) => {
-      // Cancel any in-flight refetch of this exact query so it doesn't
-      // overwrite our optimistic value.
+      // Cancel any in-flight refetches
       await queryClient.cancelQueries({ queryKey: queryKeys.tasks(searchTerm) });
+      await queryClient.cancelQueries({ queryKey: queryKeys.dashboard() });
 
       const previous = queryClient.getQueryData(queryKeys.tasks(searchTerm));
+      const oldTask = (previous || []).find((t) => t.id === id);
+      const wasComplete = oldTask?.completed_today;
+      const delta = wasComplete ? -1 : 1;
+
+      // ── 1. Optimistic update: tasks list ──────────────────────────
       queryClient.setQueryData(queryKeys.tasks(searchTerm), (old = []) =>
         old.map((t) => (t.id === id ? { ...t, completed_today: !t.completed_today } : t))
       );
 
-      // Mirror the optimistic delta into the dashboard summary so the
-      // counter (completedToday / completionRate) updates immediately
-      // without a refetch.
+      // ── 2. Optimistic update: dashboard stats ─────────────────────
       const previousDashboard = queryClient.getQueryData(queryKeys.dashboard());
       if (previousDashboard) {
-        const oldTask = (previous || []).find((t) => t.id === id);
-        const wasComplete = oldTask?.completed_today;
-        const delta = wasComplete ? -1 : 1;
         const totalTasks = previousDashboard.totalTasks || 0;
         const completedToday = Math.max(
           0,
@@ -178,27 +162,112 @@ export function useTasks(searchTerm) {
         });
       }
 
-      return { previous, previousDashboard };
+      // ── 3. Optimistic update: heatmap ─────────────────────────────
+      const today = new Date().toISOString().split('T')[0];
+      const previousHeatmap = queryClient.getQueryData(queryKeys.heatmap());
+      if (previousHeatmap) {
+        queryClient.setQueryData(queryKeys.heatmap(), (old = []) => {
+          const existingIndex = old.findIndex(d => d.date === today);
+          const totalTasks = previousDashboard?.totalTasks || previous?.length || 1;
+          if (existingIndex >= 0) {
+            const newCount = old[existingIndex].percentage * totalTasks / 100 + delta;
+            return old.map((d, i) =>
+              i === existingIndex
+                ? { ...d, percentage: Math.max(0, Math.min(100, Math.round((newCount / totalTasks) * 100))) }
+                : d
+            );
+          } else {
+            return [...old, { date: today, percentage: delta > 0 ? Math.round((1 / totalTasks) * 100) : 0 }];
+          }
+        });
+      }
+
+      // ── 4. Optimistic update: analytics (current month) ───────────
+      const now = new Date();
+      const curYear = now.getFullYear();
+      const curMonth = now.getMonth() + 1;
+      const analyticsKey = queryKeys.analytics(curYear, curMonth);
+      const previousAnalytics = queryClient.getQueryData(analyticsKey);
+      if (previousAnalytics?.dailyChartData) {
+        const todayStr = today;
+        queryClient.setQueryData(analyticsKey, (old) => {
+          if (!old) return old;
+          return {
+            ...old,
+            dailyChartData: old.dailyChartData.map(d => {
+              if (d.date === todayStr) {
+                const newPct = Math.max(0, Math.min(100, d.percentage + (delta > 0 ? Math.round(100 / old.totalTasks) : -Math.round(100 / old.totalTasks))));
+                return { ...d, percentage: newPct };
+              }
+              return d;
+            }),
+          };
+        });
+      }
+
+      // ── 5. Optimistic update: monthly tracker ─────────────────────
+      const monthlyKey = queryKeys.monthly(curYear, curMonth);
+      const previousMonthly = queryClient.getQueryData(monthlyKey);
+      if (previousMonthly?.tasks) {
+        const todayDay = now.getDate();
+        queryClient.setQueryData(monthlyKey, (old) => {
+          if (!old) return old;
+          return {
+            ...old,
+            tasks: old.tasks.map(t => {
+              if (t.id === id) {
+                return { ...t, days: { ...t.days, [todayDay]: !wasComplete } };
+              }
+              return t;
+            }),
+          };
+        });
+      }
+
+      // Return snapshots for rollback
+      return {
+        previous,
+        previousDashboard,
+        previousHeatmap: previousHeatmap,
+        previousAnalytics,
+        previousMonthly,
+      };
     },
     onError: (_err, _id, ctx) => {
-      // Roll back BOTH the task list and the dashboard summary.
+      // Roll back ALL caches
       if (ctx?.previous) {
         queryClient.setQueryData(queryKeys.tasks(searchTerm), ctx.previous);
       }
       if (ctx?.previousDashboard) {
         queryClient.setQueryData(queryKeys.dashboard(), ctx.previousDashboard);
       }
+      if (ctx?.previousHeatmap) {
+        queryClient.setQueryData(queryKeys.heatmap(), ctx.previousHeatmap);
+      }
+      if (ctx?.previousAnalytics) {
+        const now = new Date();
+        queryClient.setQueryData(
+          queryKeys.analytics(now.getFullYear(), now.getMonth() + 1),
+          ctx.previousAnalytics
+        );
+      }
+      if (ctx?.previousMonthly) {
+        const now = new Date();
+        queryClient.setQueryData(
+          queryKeys.monthly(now.getFullYear(), now.getMonth() + 1),
+          ctx.previousMonthly
+        );
+      }
       toast.error('Failed to update task');
     },
-    // Reconcile with the server's authoritative value.
     onSuccess: (data) => {
+      // Reconcile tasks list with server
       queryClient.setQueryData(queryKeys.tasks(searchTerm), (old = []) =>
         old.map((t) => (t.id === data.id ? { ...t, completed_today: data.completed } : t))
       );
-      // Soft-refresh only the aggregate queries the user might be looking
-      // at. We deliberately DO NOT touch ['heatmap'] or ['analytics'] on
-      // toggle — those are owned by their own pages and would only cause
-      // wasted network + flicker if re-rendered in the background.
+    },
+    onSettled: () => {
+      // Soft-refresh in background (does NOT block UI)
       queryClient.invalidateQueries({ queryKey: queryKeys.dashboard() });
     },
   });
@@ -241,7 +310,6 @@ export function useTasks(searchTerm) {
     allTasks: tasks,
     loading: isLoading,
     isFetching,
-    isToggling: (id) => toggleMutation.isPending && toggleMutation.variables === id,
     togglingId: toggleMutation.isPending ? toggleMutation.variables : null,
     createTask,
     updateTask,
@@ -252,11 +320,10 @@ export function useTasks(searchTerm) {
 
 /* ──────────────────────────────────────────────────────────────────────────
  * useDashboard()
- * Returns aggregated stats for the dashboard page. Uses useQuery so that
- * the data is cached and NOT refetched when unrelated mutations happen.
+ * Returns aggregated stats for the dashboard page.
  * ────────────────────────────────────────────────────────────────────── */
 export function useDashboard() {
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading } = useQuery({
     queryKey: queryKeys.dashboard(),
     queryFn: async () => {
       const res = await tasksAPI.getDashboard();
@@ -264,7 +331,7 @@ export function useDashboard() {
     },
     staleTime: 1000 * 60 * 5,
   });
-  return { data: data ?? null, loading: isLoading, isFetching };
+  return { data: data ?? null, loading: isLoading };
 }
 
 /* ──────────────────────────────────────────────────────────────────────────

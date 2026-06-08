@@ -7,11 +7,14 @@ const {
   updateTask,
   deleteTask,
   toggleTaskCompletion,
+  toggleTaskCompletionByDate,
   getMonthlyTracker,
   getAnalytics,
   getDashboardStats,
   getHeatmap,
-  exportCSV
+  exportCSV,
+  reorderTask,
+  swapTaskOrder
 } = require('../controllers/taskController');
 
 const router = express.Router();
@@ -32,9 +35,16 @@ const taskValidation = [
 // Routes
 router.get('/', getAllTasks);
 router.post('/', taskValidation, createTask);
+
+// Specific routes FIRST (before parameterized routes)
+router.put('/swap-order', swapTaskOrder);
+
+// Parameterized routes
 router.put('/:id', taskValidation, updateTask);
+router.put('/:id/reorder', reorderTask);
 router.delete('/:id', deleteTask);
 router.post('/:id/toggle', toggleTaskCompletion);
+router.post('/:id/toggle-by-date', toggleTaskCompletionByDate);
 router.get('/monthly', getMonthlyTracker);
 router.get('/analytics', getAnalytics);
 router.get('/dashboard', getDashboardStats);

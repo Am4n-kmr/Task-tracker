@@ -168,12 +168,58 @@ const toggleTaskCompletion = async (req, res) => {
       success: true,
       message: result.action === 'created' ? 'Task completed' : 'Task uncompleted',
       data: {
+        id: task.id,
         completed: result.action === 'created',
         completion: result.completion
       }
     });
   } catch (error) {
     console.error('[TASKS] Error toggling task:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to toggle task: ' + error.message
+    });
+  }
+};
+
+/**
+ * Toggle task completion for a specific date
+ * POST /api/tasks/:id/toggle-by-date
+ */
+const toggleTaskCompletionByDate = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { date } = req.body;
+
+    if (!date) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Date is required (YYYY-MM-DD)' 
+      });
+    }
+
+    // Verify task exists and belongs to user
+    const task = await Task.findById(id, req.user.id);
+    if (!task) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Task not found' 
+      });
+    }
+
+    const result = await TaskCompletion.toggle(id, req.user.id, date);
+
+    res.status(200).json({
+      success: true,
+      message: result.action === 'created' ? 'Task completed' : 'Task uncompleted',
+      data: {
+        id: task.id,
+        completed: result.action === 'created',
+        completion: result.completion
+      }
+    });
+  } catch (error) {
+    console.error('[TASKS] Error toggling task by date:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Failed to toggle task: ' + error.message
@@ -425,15 +471,86 @@ const exportCSV = async (req, res) => {
   }
 };
 
+/**
+ * Reorder a task
+ * PUT /api/tasks/:id/reorder
+ */
+const reorderTask = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { newOrder } = req.body;
+
+    if (newOrder === undefined || newOrder === null) {
+      return res.status(400).json({ success: false, message: 'newOrder is required' });
+    }
+
+    const task = await Task.findById(id, req.user.id);
+    if (!task) {
+      return res.status(404).json({ success: false, message: 'Task not found' });
+    }
+
+    const updated = await Task.reorder(id, req.user.id, newOrder);
+    
+    res.status(200).json({
+      success: true,
+      message: 'Task reordered successfully',
+      data: updated
+    });
+  } catch (error) {
+    console.error('[TASKS] Error reordering task:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to reorder task: ' + error.message
+    });
+  }
+};
+
+/**
+ * Swap order of two tasks
+ * PUT /api/tasks/swap-order
+ */
+const swapTaskOrder = async (req, res) => {
+  try {
+    const { taskId1, taskId2 } = req.body;
+
+    if (!taskId1 || !taskId2) {
+      return res.status(400).json({ success: false, message: 'taskId1 and taskId2 are required' });
+    }
+
+    const task1 = await Task.findById(taskId1, req.user.id);
+    const task2 = await Task.findById(taskId2, req.user.id);
+
+    if (!task1 || !task2) {
+      return res.status(404).json({ success: false, message: 'Task not found' });
+    }
+
+    await Task.swapOrder(req.user.id, taskId1, task2.task_order, taskId2, task1.task_order);
+
+    res.status(200).json({
+      success: true,
+      message: 'Tasks reordered successfully'
+    });
+  } catch (error) {
+    console.error('[TASKS] Error swapping task order:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to swap task order: ' + error.message
+    });
+  }
+};
+
 module.exports = {
   getAllTasks,
   createTask,
   updateTask,
   deleteTask,
   toggleTaskCompletion,
+  toggleTaskCompletionByDate,
   getMonthlyTracker,
   getAnalytics,
   getDashboardStats,
   getHeatmap,
-  exportCSV
+  exportCSV,
+  reorderTask,
+  swapTaskOrder
 };
