@@ -1,5 +1,5 @@
 import { useState, useMemo, memo, useCallback, useRef, useEffect } from 'react';
-import { Plus, Target, Flame, Trophy, CheckCircle, Circle, X, ChevronDown, ChevronUp, Activity, Edit2, Trash2, Check } from 'lucide-react';
+import { Plus, Target, Flame, Trophy, CheckCircle, Circle, X, ChevronDown, ChevronUp, Activity, Edit2, Trash2, Check, GripVertical } from 'lucide-react';
 import { useTasks, useDashboard } from '../hooks/useTasks';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
@@ -16,6 +16,23 @@ import {
 } from 'chart.js';
 import { tasksAPI } from '../services/api';
 import toast from 'react-hot-toast';
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  TouchSensor,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+  arrayMove,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { useQueryClient } from '@tanstack/react-query';
+import { queryKeys } from '../hooks/queryKeys';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Filler);
 
@@ -24,25 +41,27 @@ const DEBUG_RERENDERS = false;
 const dlog = (...args) => { if (DEBUG_RERENDERS) console.log(...args); };
 
 /* ── Responsive day count ─────────────────────────────────────────── */
-function getDayCount() {
-  const w = window.innerWidth;
+function getDayCount(containerWidth) {
+  const w = containerWidth || window.innerWidth;
   if (w < 480) return 5;   // mobile: last 4 + today
   if (w < 768) return 5;   // small tablet: last 4 + today
   if (w < 1024) return 7;  // tablet: last 6 + today
-  return 8;                 // desktop: last 7 + today
+  // Desktop: calculate based on available width
+  const dayColWidth = 48;
+  const available = w - 180; // minus task column
+  const maxDays = Math.floor(available / dayColWidth);
+  return Math.min(Math.max(maxDays, 7), 14);
 }
 
-/* ── Build recent days (newest RIGHT) ─────────────────────────────── */
-function buildRecentDays(count) {
+/* ── Build visible days (single source of truth, newest RIGHT) ────── */
+function buildVisibleDays(count) {
   const days = [];
   const now = new Date();
-  // count-1 days ago through today
   for (let i = count - 1; i >= 0; i--) {
     const d = new Date(now);
     d.setDate(d.getDate() - i);
     days.push({
       date: d.toISOString().split('T')[0],
-      label: i === 0 ? 'Today' : i === 1 ? 'Yesterday' : d.toLocaleDateString('en-US', { weekday: 'short' }),
       dayName: d.toLocaleDateString('en-US', { weekday: 'short' }),
       day: d.getDate(),
       isToday: i === 0,
@@ -60,12 +79,12 @@ export default function Dashboard() {
   const { theme } = useTheme();
   const { tasks, loading: tasksLoading, togglingId, createTask, updateTask, deleteTask, toggleTask } = useTasks();
   const { data: stats, loading: statsLoading } = useDashboard();
+  const queryClient = useQueryClient();
 
   const [dayCount, setDayCount] = useState(() => getDayCount());
   const [showAddForm, setShowAddForm] = useState(false);
   const [newTaskTitle, setNewTaskTitle] = useState('');
   const [isCreating, setIsCreating] = useState(false);
-  const [searchTerm, setSearchTerm] = useState('');
   const [editingTaskId, setEditingTaskId] = useState(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState(null);
@@ -73,8 +92,8 @@ export default function Dashboard() {
 
   const containerRef = useRef(null);
 
-  // Recent days (computed once)
-  const recentDays = useMemo(() => buildRecentDays(Math.max(dayCount, 4)), [dayCount]);
+  // ── SINGLE SOURCE OF TRUTH: visibleDays ────────────────────────────
+  const visibleDays = useMemo(() => buildVisibleDays(Math.max(dayCount, 4)), [dayCount]);
 
   const hasLoadedRef = useRef(false);
   const showInitialSkeleton = !hasLoadedRef.current && (tasksLoading || statsLoading);
@@ -90,6 +109,39 @@ export default function Dashboard() {
     if (hour < 18) return 'Good Afternoon';
     return 'Good Evening';
   }, []);
+
+  // ── Drag & Drop sensors ────────────────────────────────────────────
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 8 } })
+  );
+
+  const handleDragEnd = useCallback(async (event) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+
+    const oldIndex = tasks.findIndex(t => t.id === active.id);
+    const newIndex = tasks.findIndex(t => t.id === over.id);
+    if (oldIndex === -1 || newIndex === -1) return;
+
+    // Get previous state for rollback
+    const tasksKey = queryKeys.tasks();
+    const previousTasks = queryClient.getQueryData(tasksKey);
+
+    // Optimistic reorder in cache
+    const reordered = arrayMove([...tasks], oldIndex, newIndex);
+    queryClient.setQueryData(tasksKey, reordered);
+
+    try {
+      await tasksAPI.swapOrder(active.id, over.id);
+    } catch {
+      // Rollback on failure
+      if (previousTasks) {
+        queryClient.setQueryData(tasksKey, previousTasks);
+      }
+      toast.error('Failed to reorder tasks');
+    }
+  }, [tasks, queryClient]);
 
   const handleToggleTask = useCallback((id) => toggleTask(id), [toggleTask]);
 
@@ -137,30 +189,18 @@ export default function Dashboard() {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // Move up/down - use queryClient ref
-  const handleMoveTask = useCallback(async (taskId, direction, currentIndex) => {
-    const swapIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
-    if (swapIndex < 0 || swapIndex >= tasks.length) return;
-    try {
-      await tasksAPI.swapOrder(taskId, tasks[swapIndex].id);
-      // Simple page reload to re-fetch with new order
-      window.location.reload();
-    } catch { toast.error('Failed to reorder'); }
-  }, [tasks]);
-
   // ── Weekly data for chart (from dashboard stats) ──
   const weeklyData = useMemo(() => {
-    return recentDays.map(d => {
-      // For today, use real task data. For past days, use stats if available
+    return visibleDays.map(d => {
       const isToday = d.isToday;
       const completed = isToday ? tasks.filter(t => t.completed_today).length : (stats?.weeklyData?.find(w => w.date === d.date)?.completed || 0);
       const total = tasks.length || stats?.totalTasks || 1;
       const percentage = isToday
         ? (total > 0 ? Math.round((completed / total) * 100) : 0)
         : (stats?.weeklyData?.find(w => w.date === d.date)?.percentage || 0);
-      return { date: d.date, label: d.label, day: d.day, percentage, completed, total, isToday };
+      return { date: d.date, label: d.dayName, day: d.day, percentage, completed, total, isToday };
     });
-  }, [recentDays, tasks, stats]);
+  }, [visibleDays, tasks, stats]);
 
   // ── Chart colors ──────────────────────────────────────────────────
   const chartColors = useMemo(() => {
@@ -287,22 +327,32 @@ export default function Dashboard() {
             <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>Tap + to add your first task</p>
           </div>
         ) : (
-          <CheckinBoard
-            tasks={tasks}
-            recentDays={recentDays}
-            onToggle={handleToggleTask}
-            togglingId={togglingId}
-            editingTaskId={editingTaskId}
-            editingTitle={editingTitle}
-            onStartEdit={handleStartEdit}
-            onSaveEdit={handleSaveEdit}
-            onCancelEdit={handleCancelEdit}
-            onDeleteRequest={setDeleteConfirmId}
-            deleteConfirmId={deleteConfirmId}
-            onDeleteConfirm={handleDeleteConfirm}
-            onCancelDelete={() => setDeleteConfirmId(null)}
-            onMoveTask={handleMoveTask}
-          />
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={handleDragEnd}
+          >
+            <SortableContext
+              items={tasks.map(t => t.id)}
+              strategy={verticalListSortingStrategy}
+            >
+              <CheckinBoard
+                tasks={tasks}
+                visibleDays={visibleDays}
+                onToggle={handleToggleTask}
+                togglingId={togglingId}
+                editingTaskId={editingTaskId}
+                editingTitle={editingTitle}
+                onStartEdit={handleStartEdit}
+                onSaveEdit={handleSaveEdit}
+                onCancelEdit={handleCancelEdit}
+                onDeleteRequest={setDeleteConfirmId}
+                deleteConfirmId={deleteConfirmId}
+                onDeleteConfirm={handleDeleteConfirm}
+                onCancelDelete={() => setDeleteConfirmId(null)}
+              />
+            </SortableContext>
+          </DndContext>
         )}
       </div>
 
@@ -341,114 +391,164 @@ export default function Dashboard() {
         )}
       </div>
 
-      {/* ═══ SECTION 5: Add Task Button & Form ═══ */}
-      <div className="flex items-center gap-2">
-        <button
-          onClick={() => setShowAddForm(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all hover:scale-105"
-          style={{ backgroundColor: 'var(--accent)', color: 'white' }}
+      {/* ═══ SECTION 5: Floating Add Task Button + Centered Modal ═══ */}
+      {showAddForm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ backgroundColor: 'rgba(0,0,0,0.4)' }}
+          onClick={(e) => { if (e.target === e.currentTarget) { setShowAddForm(false); setNewTaskTitle(''); } }}
         >
-          <Plus size={14} />
-          Add Task
-        </button>
-        {showAddForm && (
-          <form onSubmit={handleCreateTask} className="flex-1 flex gap-1">
+          <form
+            onSubmit={handleCreateTask}
+            className="animate-scale-in"
+            style={{
+              backgroundColor: 'var(--card-bg)',
+              border: '1px solid var(--border-color)',
+              boxShadow: '0 16px 48px rgba(0,0,0,0.2)',
+              borderRadius: '16px',
+              padding: '20px',
+              width: '320px',
+              maxWidth: '90vw',
+            }}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>New Task</span>
+              <button type="button" onClick={() => { setShowAddForm(false); setNewTaskTitle(''); }}
+                className="p-1 rounded-lg hover:bg-[var(--hover-bg)]" style={{ color: 'var(--text-muted)' }}>
+                <X size={16} />
+              </button>
+            </div>
             <input
               type="text"
               value={newTaskTitle}
               onChange={(e) => setNewTaskTitle(e.target.value)}
-              placeholder="New task..."
-              className="flex-1 px-3 py-1.5 rounded-lg text-xs outline-none"
+              placeholder="What do you want to track?"
+              className="w-full px-3 py-2.5 rounded-lg text-sm outline-none mb-3"
               style={{ backgroundColor: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }}
               autoFocus
               onKeyDown={(e) => e.key === 'Escape' && (setShowAddForm(false), setNewTaskTitle(''))}
             />
-            <button type="submit" disabled={isCreating || !newTaskTitle.trim()}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium text-white"
-              style={{ backgroundColor: newTaskTitle.trim() ? 'var(--accent)' : 'var(--text-muted)' }}>
-              {isCreating ? '...' : 'Add'}
-            </button>
-            <button type="button" onClick={() => { setShowAddForm(false); setNewTaskTitle(''); }}
-              className="px-2 py-1.5 rounded-lg text-xs" style={{ color: 'var(--text-muted)' }}>
-              <X size={14} />
-            </button>
+            <div className="flex gap-2 justify-end">
+              <button type="button" onClick={() => { setShowAddForm(false); setNewTaskTitle(''); }}
+                className="px-4 py-2 rounded-lg text-xs font-medium"
+                style={{ color: 'var(--text-secondary)', backgroundColor: 'var(--bg-secondary)' }}>
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isCreating || !newTaskTitle.trim()}
+                className="px-4 py-2 rounded-lg text-xs font-medium text-white"
+                style={{ backgroundColor: newTaskTitle.trim() ? 'var(--accent)' : 'var(--text-muted)' }}
+              >
+                {isCreating ? 'Creating...' : 'Add Task'}
+              </button>
+            </div>
           </form>
-        )}
-      </div>
+        </div>
+      )}
+      <button
+        onClick={() => setShowAddForm(prev => !prev)}
+        className="fab"
+        aria-label="Add Task"
+      >
+        <Plus size={24} />
+      </button>
     </div>
   );
 }
 
 /* ══════════════════════════════════════════════════════════════════════
-   Check-in Board (the main table component)
+   Check-in Board (CSS Grid layout driven by visibleDays[])
    ══════════════════════════════════════════════════════════════════════ */
 const CheckinBoard = memo(function CheckinBoard({
-  tasks, recentDays, onToggle, togglingId,
+  tasks, visibleDays, onToggle, togglingId,
   editingTaskId, editingTitle, onStartEdit, onSaveEdit, onCancelEdit,
-  onDeleteRequest, deleteConfirmId, onDeleteConfirm, onCancelDelete, onMoveTask
+  onDeleteRequest, deleteConfirmId, onDeleteConfirm, onCancelDelete
 }) {
   dlog('CheckinBoard render');
-  const scrollRef = useRef(null);
+
+  // Grid template columns: task column + N day columns
+  const gridTemplateColumns = useMemo(() => {
+    return `180px repeat(${visibleDays.length}, 1fr)`;
+  }, [visibleDays.length]);
 
   return (
-    <div className="checkin-board-scroll" ref={scrollRef}>
-      <table className="checkin-board-table">
-        <thead>
-          <tr>
-            <th className="checkin-board-th checkin-task-col">
-              <div className="flex items-center gap-1">
-                <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>Tasks</span>
-              </div>
-            </th>
-            {recentDays.map((d) => (
-              <th key={d.date} className={`checkin-board-th checkin-day-col ${d.isToday ? 'is-today' : ''}`}>
-                {/* TODAY INDICATOR - topmost */}
-                {d.isToday && <span className="checkin-today-badge">TODAY</span>}
-                {/* Day name */}
-                <span className="checkin-day-name">{d.dayName}</span>
-                {/* Date number */}
-                <span className="checkin-date-num">{d.day}</span>
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {tasks.map((task, idx) => (
-            <CheckinRow
-              key={task.id}
-              task={task}
-              recentDays={recentDays}
-              onToggle={onToggle}
-              isToggling={togglingId === task.id}
-              isEditing={editingTaskId === task.id}
-              editingTitle={editingTitle}
-              onStartEdit={() => onStartEdit(task)}
-              onSaveEdit={() => onSaveEdit(task.id)}
-              onCancelEdit={onCancelEdit}
-              onDeleteRequest={() => onDeleteRequest(task.id)}
-              isDeleteConfirm={deleteConfirmId === task.id}
-              onDeleteConfirm={() => onDeleteConfirm(task.id)}
-              onCancelDelete={onCancelDelete}
-              onMoveUp={idx > 0 ? () => onMoveTask(task.id, 'up', idx) : null}
-              onMoveDown={idx < tasks.length - 1 ? () => onMoveTask(task.id, 'down', idx) : null}
-            />
+    <div className="checkin-board-scroll">
+      <div
+        className="checkin-board-grid"
+        style={{ gridTemplateColumns }}
+      >
+        {/* ── Header Row ───────────────────────────────────────────── */}
+        <div className="checkin-grid-header">
+          <div className="checkin-grid-cell checkin-task-col-header">
+            <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>Tasks</span>
+          </div>
+          {visibleDays.map((d) => (
+            <div
+              key={d.date}
+              className={`checkin-grid-cell checkin-day-col-header ${d.isToday ? 'is-today' : ''}`}
+            >
+              {/* TODAY indicator - ALWAYS topmost */}
+              {d.isToday && <span className="checkin-today-badge">TODAY</span>}
+              {/* Subtle arrow below TODAY */}
+              {d.isToday && <span className="checkin-today-arrow">↓</span>}
+              {/* Day name */}
+              <span className="checkin-day-name">{d.dayName}</span>
+              {/* Date number */}
+              <span className="checkin-date-num">{d.day}</span>
+            </div>
           ))}
-        </tbody>
-      </table>
+        </div>
+
+        {/* ── Task Rows ─────────────────────────────────────────────── */}
+        {tasks.map((task, idx) => (
+          <CheckinGridRow
+            key={task.id}
+            task={task}
+            visibleDays={visibleDays}
+            onToggle={onToggle}
+            isToggling={togglingId === task.id}
+            isEditing={editingTaskId === task.id}
+            editingTitle={editingTitle}
+            onStartEdit={() => onStartEdit(task)}
+            onSaveEdit={() => onSaveEdit(task.id)}
+            onCancelEdit={onCancelEdit}
+            onDeleteRequest={() => onDeleteRequest(task.id)}
+            isDeleteConfirm={deleteConfirmId === task.id}
+            onDeleteConfirm={() => onDeleteConfirm(task.id)}
+            onCancelDelete={onCancelDelete}
+          />
+        ))}
+      </div>
     </div>
   );
 });
 
 /* ══════════════════════════════════════════════════════════════════════
-   Check-in Row (memoized to only rerender when its own task changes)
+   Check-in Grid Row (sortable via @dnd-kit)
    ══════════════════════════════════════════════════════════════════════ */
-const CheckinRow = memo(function CheckinRow({
-  task, recentDays, onToggle, isToggling,
+const CheckinGridRow = memo(function CheckinGridRow({
+  task, visibleDays, onToggle, isToggling,
   isEditing, editingTitle, onStartEdit, onSaveEdit, onCancelEdit,
-  onDeleteRequest, isDeleteConfirm, onDeleteConfirm, onCancelDelete,
-  onMoveUp, onMoveDown
+  onDeleteRequest, isDeleteConfirm, onDeleteConfirm, onCancelDelete
 }) {
-  dlog('CheckinRow render', task.id);
+  dlog('CheckinGridRow render', task.id);
+
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: task.id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.6 : 1,
+    position: isDragging ? 'relative' : undefined,
+    zIndex: isDragging ? 50 : undefined,
+  };
+
   const [editValue, setEditValue] = useState(task.title);
 
   // Sync editValue when editing starts
@@ -457,21 +557,23 @@ const CheckinRow = memo(function CheckinRow({
   }, [isEditing, task.title]);
 
   return (
-    <tr className="checkin-board-tr" style={{ borderTop: '1px solid var(--border-color)' }}>
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`checkin-grid-row ${isDragging ? 'is-dragging' : ''}`}
+    >
       {/* Task name cell - sticky left */}
-      <td className="checkin-board-td checkin-task-col">
+      <div className="checkin-grid-cell checkin-task-col">
         <div className="flex items-center gap-1">
-          {/* Reorder buttons */}
-          <div className="checkin-reorder-group">
-            <button onClick={onMoveUp} disabled={!onMoveUp}
-              className="checkin-reorder-btn" style={{ opacity: onMoveUp ? 1 : 0.2 }}>
-              <ChevronUp size={10} />
-            </button>
-            <button onClick={onMoveDown} disabled={!onMoveDown}
-              className="checkin-reorder-btn" style={{ opacity: onMoveDown ? 1 : 0.2 }}>
-              <ChevronDown size={10} />
-            </button>
-          </div>
+          {/* Drag handle */}
+          <button
+            className="checkin-drag-handle"
+            {...attributes}
+            {...listeners}
+            aria-label="Drag to reorder"
+          >
+            <GripVertical size={12} />
+          </button>
 
           {isEditing ? (
             <div className="flex items-center gap-1 flex-1 min-w-0">
@@ -497,7 +599,13 @@ const CheckinRow = memo(function CheckinRow({
             </div>
           ) : (
             <>
-              <span className="checkin-task-title" onClick={onStartEdit} title={task.title}>{task.title}</span>
+              <span
+                className={`checkin-task-title ${task.completed_today ? 'is-completed' : ''}`}
+                onClick={onStartEdit}
+                title={task.title}
+              >
+                {task.title}
+              </span>
               <div className="checkin-task-actions">
                 <button onClick={onStartEdit} className="checkin-action-btn" aria-label="Edit">
                   <Edit2 size={10} />
@@ -520,21 +628,23 @@ const CheckinRow = memo(function CheckinRow({
             </>
           )}
         </div>
-      </td>
+      </div>
 
-      {/* Day cells */}
-      {recentDays.map((d) => (
-        <td key={d.date} className={`checkin-board-td checkin-day-col ${d.isToday ? 'is-today' : ''}`}>
+      {/* Day cells - rendered from visibleDays, same source as header */}
+      {visibleDays.map((d) => (
+        <div
+          key={d.date}
+          className={`checkin-grid-cell checkin-day-cell ${d.isToday ? 'is-today' : ''}`}
+        >
           <CheckinCell
             checked={d.isToday ? task.completed_today : false}
             onClick={() => d.isToday ? onToggle(task.id) : null}
             isToggling={isToggling && d.isToday}
           />
-        </td>
+        </div>
       ))}
-    </tr>
+    </div>
   );
-// Custom comparison - recentDays is always same reference within a render cycle
 }, (prev, next) =>
   prev.task.id === next.task.id &&
   prev.task.title === next.task.title &&

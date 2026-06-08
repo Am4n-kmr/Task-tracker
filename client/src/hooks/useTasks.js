@@ -61,6 +61,10 @@ export function useTasks(searchTerm) {
       );
       toast.success('Task created!');
       queryClient.invalidateQueries({ queryKey: queryKeys.dashboard() });
+      // Invalidate all monthly/analytics/heatmap by prefix
+      queryClient.invalidateQueries({ queryKey: ['monthly'] });
+      queryClient.invalidateQueries({ queryKey: ['analytics'] });
+      queryClient.invalidateQueries({ queryKey: ['heatmap'] });
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.tasks(searchTerm) });
@@ -79,6 +83,17 @@ export function useTasks(searchTerm) {
       queryClient.setQueryData(queryKeys.tasks(searchTerm), (old = []) =>
         old.map((t) => (t.id === id ? { ...t, title } : t))
       );
+      // Also update title in all monthly caches
+      queryClient.getQueryCache().findAll({ queryKey: ['monthly'] }).forEach(query => {
+        const key = query.queryKey;
+        const oldData = queryClient.getQueryData(key);
+        if (oldData?.tasks) {
+          queryClient.setQueryData(key, {
+            ...oldData,
+            tasks: oldData.tasks.map(t => t.id === id ? { ...t, title } : t),
+          });
+        }
+      });
       return { previous };
     },
     onError: (_err, _vars, ctx) => {
@@ -92,6 +107,8 @@ export function useTasks(searchTerm) {
         old.map((t) => (t.id === serverTask.id ? serverTask : t))
       );
       toast.success('Task updated!');
+      // Invalidate monthly to sync title changes
+      queryClient.invalidateQueries({ queryKey: ['monthly'] });
     },
   });
 
@@ -107,6 +124,17 @@ export function useTasks(searchTerm) {
       queryClient.setQueryData(queryKeys.tasks(searchTerm), (old = []) =>
         old.filter((t) => t.id !== id)
       );
+      // Also remove from all monthly caches
+      queryClient.getQueryCache().findAll({ queryKey: ['monthly'] }).forEach(query => {
+        const key = query.queryKey;
+        const oldData = queryClient.getQueryData(key);
+        if (oldData?.tasks) {
+          queryClient.setQueryData(key, {
+            ...oldData,
+            tasks: oldData.tasks.filter(t => t.id !== id),
+          });
+        }
+      });
       return { previous };
     },
     onError: (_err, _id, ctx) => {
@@ -118,11 +146,114 @@ export function useTasks(searchTerm) {
     onSuccess: () => {
       toast.success('Task deleted!');
       queryClient.invalidateQueries({ queryKey: queryKeys.dashboard() });
+      queryClient.invalidateQueries({ queryKey: ['monthly'] });
+      queryClient.invalidateQueries({ queryKey: ['analytics'] });
+      queryClient.invalidateQueries({ queryKey: ['heatmap'] });
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.tasks(searchTerm) });
     },
   });
+
+  /* ── mutation: toggle by date (for MonthlyTracker) ────────────────── */
+  const toggleByDateMutation = useMutation({
+    mutationFn: async ({ taskId, dateStr }) => {
+      const res = await tasksAPI.toggleByDate(taskId, dateStr);
+      return res.data.data;
+    },
+    onMutate: async ({ taskId, dateStr }) => {
+      // Cancel all monthly queries
+      await queryClient.cancelQueries({ queryKey: ['monthly'] });
+      // Snapshot all monthly caches
+      const previousMonthlyCaches = {};
+      queryClient.getQueryCache().findAll({ queryKey: ['monthly'] }).forEach(query => {
+        previousMonthlyCaches[JSON.stringify(query.queryKey)] = queryClient.getQueryData(query.queryKey);
+      });
+
+      const dateObj = new Date(dateStr + 'T00:00:00');
+      const y = dateObj.getFullYear();
+      const m = dateObj.getMonth() + 1;
+      const day = dateObj.getDate();
+      const monthlyKey = ['monthly', y, m];
+      const monthlyData = queryClient.getQueryData(monthlyKey);
+      
+      if (monthlyData?.tasks) {
+        queryClient.setQueryData(monthlyKey, (old) => {
+          if (!old) return old;
+          return {
+            ...old,
+            tasks: old.tasks.map(t => {
+              if (t.id === taskId) {
+                const wasCompleted = t.days?.[day] === true;
+                return { ...t, days: { ...t.days, [day]: !wasCompleted } };
+              }
+              return t;
+            }),
+          };
+        });
+      }
+
+      // If toggling today, also sync dashboard and tasks list
+      const today = new Date().toISOString().split('T')[0];
+      if (dateStr === today) {
+        await queryClient.cancelQueries({ queryKey: queryKeys.tasks(searchTerm) });
+        await queryClient.cancelQueries({ queryKey: queryKeys.dashboard() });
+
+        const previousTasks = queryClient.getQueryData(queryKeys.tasks(searchTerm));
+        const oldTask = (previousTasks || []).find(t => t.id === taskId);
+        const wasComplete = oldTask?.completed_today;
+        const delta = wasComplete ? -1 : 1;
+
+        queryClient.setQueryData(queryKeys.tasks(searchTerm), (old = []) =>
+          old.map((t) => (t.id === taskId ? { ...t, completed_today: !t.completed_today } : t))
+        );
+
+        const prevDash = queryClient.getQueryData(queryKeys.dashboard());
+        if (prevDash) {
+          queryClient.setQueryData(queryKeys.dashboard(), (old) => {
+            if (!old) return old;
+            const completedToday = Math.max(0, Math.min(old.totalTasks || 0, (old.completedToday || 0) + delta));
+            return {
+              ...old,
+              completedToday,
+              completionPercent: (old.totalTasks || 0) > 0 ? Math.round((completedToday / old.totalTasks) * 100) : 0,
+            };
+          });
+        }
+
+        return { previousMonthlyCaches, previousTasks, prevDash };
+      }
+
+      return { previousMonthlyCaches };
+    },
+    onError: (_err, _vars, ctx) => {
+      if (ctx?.previousMonthlyCaches) {
+        Object.entries(ctx.previousMonthlyCaches).forEach(([keyStr, data]) => {
+          queryClient.setQueryData(JSON.parse(keyStr), data);
+        });
+      }
+      if (ctx?.previousTasks) {
+        queryClient.setQueryData(queryKeys.tasks(searchTerm), ctx.previousTasks);
+      }
+      if (ctx?.prevDash) {
+        queryClient.setQueryData(queryKeys.dashboard(), ctx.prevDash);
+      }
+      toast.error('Failed to update');
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['monthly'] });
+      queryClient.invalidateQueries({ queryKey: queryKeys.dashboard() });
+      queryClient.invalidateQueries({ queryKey: ['heatmap'] });
+      queryClient.invalidateQueries({ queryKey: ['analytics'] });
+    },
+  });
+
+  const toggleByDate = useCallback(
+    async (taskId, dateStr) => {
+      await toggleByDateMutation.mutateAsync({ taskId, dateStr });
+    },
+    [toggleByDateMutation]
+  );
 
   /* ── mutation: toggle completion (the hot path) ───────────────────── */
   const toggleMutation = useMutation({
@@ -315,6 +446,7 @@ export function useTasks(searchTerm) {
     updateTask,
     deleteTask,
     toggleTask,
+    toggleByDate,
   };
 }
 
@@ -338,7 +470,14 @@ export function useDashboard() {
  * useMonthlyData(year, month)
  * ────────────────────────────────────────────────────────────────────── */
 export function useMonthlyData(year, month) {
-  const [currentDate, setCurrentDate] = useState(() => new Date(year, month - 1, 1));
+  const [currentDate, setCurrentDate] = useState(() => {
+    // When year/month are provided from URL, use them. Otherwise default to current month.
+    if (year != null && month != null) {
+      const d = new Date(year, month - 1, 1);
+      if (!isNaN(d.getTime())) return d;
+    }
+    return new Date();
+  });
   const y = currentDate.getFullYear();
   const m = currentDate.getMonth() + 1;
 

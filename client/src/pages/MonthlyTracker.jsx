@@ -1,24 +1,23 @@
 import { useState, memo, useRef, useEffect, useCallback, useMemo } from 'react';
 import { ChevronLeft, ChevronRight, Check, Download, Calendar, Edit2, X, Trash2, ChevronUp, ChevronDown } from 'lucide-react';
-import { useMonthlyData } from '../hooks/useTasks';
+import { useMonthlyData, useTasks } from '../hooks/useTasks';
 import { getMonthName, exportToPDF } from '../utils/helpers';
 import { tasksAPI } from '../services/api';
+import { useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 
 export default function MonthlyTracker() {
   const { data, loading, year, month, goToPreviousMonth, goToNextMonth, goToCurrentMonth } = useMonthlyData();
+  const { toggleByDate, deleteTask, updateTask } = useTasks();
+  const queryClient = useQueryClient();
   const [exporting, setExporting] = useState(false);
   const scrollRef = useRef(null);
   const [editingTaskId, setEditingTaskId] = useState(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState(null);
-  const [refreshKey, setRefreshKey] = useState(0);
 
-  // Force a refresh after mutations
-  const forceRefresh = useCallback(() => setRefreshKey(k => k + 1), []);
-
+  // Scroll to today when month loads
   useEffect(() => {
-    // Scroll to today when month loads
     if (scrollRef.current && data) {
       const today = new Date().getDate();
       const cellWidth = 44;
@@ -57,17 +56,13 @@ export default function MonthlyTracker() {
   const daysInMonth = data?.lastDay || 0;
 
   // Build day headers with proper chronological order: oldest LEFT, newest RIGHT
-  // Example: Mon Tue Wed Thu Fri Sat Sun (today=Sunday, newest=right)
   const dayHeaders = useMemo(() => {
-    // Guard against NaN or invalid dates
     if (!safeMonth || !safeYear || !daysInMonth || daysInMonth < 1) return [];
 
     const today = new Date();
     const headers = [];
     for (let i = 1; i <= daysInMonth; i++) {
-      // month is 1-indexed, so month-1 for Date constructor (0-indexed)
       const date = new Date(safeYear, safeMonth - 1, i);
-      // Validate the date is valid (not NaN)
       if (isNaN(date.getTime())) continue;
 
       headers.push({
@@ -81,17 +76,11 @@ export default function MonthlyTracker() {
     return headers;
   }, [safeYear, safeMonth, daysInMonth]);
 
-  // Toggle completion for a specific day
+  // Toggle completion for a specific day - uses optimistic cache-driven mutation
   const handleToggleDay = useCallback(async (taskId, day) => {
-    const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-
-    try {
-      await tasksAPI.toggleByDate(taskId, dateStr);
-      forceRefresh();
-    } catch (err) {
-      toast.error('Failed to update');
-    }
-  }, [year, month, forceRefresh]);
+    const dateStr = `${safeYear}-${String(safeMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    await toggleByDate(taskId, dateStr);
+  }, [safeYear, safeMonth, toggleByDate]);
 
   // Edit task
   const handleStartEdit = useCallback((task) => {
@@ -104,16 +93,10 @@ export default function MonthlyTracker() {
       toast.error('Title cannot be empty');
       return;
     }
-    try {
-      await tasksAPI.update(taskId, { title: editingTitle.trim() });
-      setEditingTaskId(null);
-      setEditingTitle('');
-      forceRefresh();
-      toast.success('Task updated!');
-    } catch {
-      toast.error('Failed to update task');
-    }
-  }, [editingTitle, forceRefresh]);
+    await updateTask(taskId, editingTitle.trim());
+    setEditingTaskId(null);
+    setEditingTitle('');
+  }, [editingTitle, updateTask]);
 
   const handleCancelEdit = useCallback(() => {
     setEditingTaskId(null);
@@ -122,15 +105,9 @@ export default function MonthlyTracker() {
 
   // Delete task
   const handleDeleteConfirm = useCallback(async (taskId) => {
-    try {
-      await tasksAPI.delete(taskId);
-      setDeleteConfirmId(null);
-      forceRefresh();
-      toast.success('Task deleted!');
-    } catch {
-      toast.error('Failed to delete task');
-    }
-  }, [forceRefresh]);
+    await deleteTask(taskId);
+    setDeleteConfirmId(null);
+  }, [deleteTask]);
 
   // Reorder tasks
   const handleMoveTask = useCallback(async (taskId, direction) => {
@@ -145,13 +122,25 @@ export default function MonthlyTracker() {
     const task1 = tasks[currentIndex];
     const task2 = tasks[swapIndex];
 
+    // Optimistic reorder in cache
+    const monthlyKey = ['monthly', safeYear, safeMonth];
+    const monthlyData = queryClient.getQueryData(monthlyKey);
+    if (monthlyData?.tasks) {
+      const reordered = [...monthlyData.tasks];
+      [reordered[currentIndex], reordered[swapIndex]] = [reordered[swapIndex], reordered[currentIndex]];
+      queryClient.setQueryData(monthlyKey, { ...monthlyData, tasks: reordered });
+    }
+
     try {
       await tasksAPI.swapOrder(task1.id, task2.id);
-      forceRefresh();
     } catch {
+      // Rollback
+      if (monthlyData?.tasks) {
+        queryClient.setQueryData(monthlyKey, monthlyData);
+      }
       toast.error('Failed to reorder');
     }
-  }, [data, forceRefresh]);
+  }, [data, queryClient, safeYear, safeMonth]);
 
   if (loading) {
     return <MonthlySkeleton />;
@@ -218,19 +207,12 @@ export default function MonthlyTracker() {
         ) : (
           <div 
             className="monthly-tracker-wrapper" 
-            ref={scrollRef} 
-            key={refreshKey}
+            ref={scrollRef}
             style={{ '--monthly-days': daysInMonth }}
           >
-            {/* Calendar grid using CSS Grid for perfect alignment */}
             <div className="monthly-tracker-grid">
-              {/* Header row with column structure:
-                  Column 0: Task Name (sticky)
-                  Columns 1..N: Day columns (each has today indicator, day name, date, task cells) */}
-              
               {/* Grid Header Row */}
               <div className="monthly-grid-row monthly-grid-header">
-                {/* Task name header cell */}
                 <div
                   className="monthly-grid-cell monthly-task-header sticky-col"
                   style={{
@@ -241,7 +223,6 @@ export default function MonthlyTracker() {
                   <span className="text-xs font-semibold uppercase tracking-wider">Tasks</span>
                 </div>
 
-                {/* Day columns - CHRONOLOGICAL ORDER: oldest left, newest right */}
                 {dayHeaders.map(({ day, dayName, isToday, isWeekend }) => (
                   <div
                     key={day}
@@ -251,13 +232,10 @@ export default function MonthlyTracker() {
                       backgroundColor: isToday ? 'var(--accent)' : 'transparent',
                     }}
                   >
-                    {/* TODAY INDICATOR - TOPMOST element */}
                     {isToday && (
                       <span className="monthly-today-badge">TODAY</span>
                     )}
-                    {/* Day of week (Sun, Mon, etc.) */}
                     <span className="monthly-day-name">{dayName}</span>
-                    {/* Date number */}
                     <span className="monthly-date-num">{day}</span>
                   </div>
                 ))}
@@ -265,166 +243,24 @@ export default function MonthlyTracker() {
 
               {/* Task rows */}
               {data.tasks.map((task, taskIndex) => (
-                <div key={task.id} className="monthly-grid-row monthly-grid-task-row">
-                  {/* Task name cell - sticky with edit/delete/reorder controls */}
-                  <div
-                    className="monthly-grid-cell monthly-task-cell sticky-col"
-                    style={{
-                      color: 'var(--text-primary)',
-                      backgroundColor: 'var(--card-bg)',
-                    }}
-                  >
-                    <div className="monthly-task-controls">
-                      {/* Reorder buttons */}
-                      <div className="monthly-reorder-btns">
-                        <button
-                          onClick={() => handleMoveTask(task.id, 'up')}
-                          disabled={taskIndex === 0}
-                          className="monthly-reorder-btn"
-                          aria-label="Move up"
-                          style={{ color: 'var(--text-muted)', opacity: taskIndex === 0 ? 0.3 : 1 }}
-                        >
-                          <ChevronUp size={12} />
-                        </button>
-                        <button
-                          onClick={() => handleMoveTask(task.id, 'down')}
-                          disabled={taskIndex === data.tasks.length - 1}
-                          className="monthly-reorder-btn"
-                          aria-label="Move down"
-                          style={{ color: 'var(--text-muted)', opacity: taskIndex === data.tasks.length - 1 ? 0.3 : 1 }}
-                        >
-                          <ChevronDown size={12} />
-                        </button>
-                      </div>
-
-                      {/* Task title with inline editing */}
-                      {editingTaskId === task.id ? (
-                        <div className="monthly-edit-form">
-                          <input
-                            type="text"
-                            value={editingTitle}
-                            onChange={(e) => setEditingTitle(e.target.value)}
-                            className="monthly-edit-input"
-                            style={{
-                              backgroundColor: 'var(--bg-secondary)',
-                              color: 'var(--text-primary)',
-                              border: '1px solid var(--accent)',
-                            }}
-                            autoFocus
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') handleSaveEdit(task.id);
-                              if (e.key === 'Escape') handleCancelEdit();
-                            }}
-                          />
-                          <div className="monthly-edit-actions">
-                            <button
-                              onClick={() => handleSaveEdit(task.id)}
-                              className="monthly-edit-save"
-                              style={{ color: 'var(--success)' }}
-                              aria-label="Save"
-                            >
-                              <Check size={14} />
-                            </button>
-                            <button
-                              onClick={handleCancelEdit}
-                              className="monthly-edit-cancel"
-                              style={{ color: 'var(--danger)' }}
-                              aria-label="Cancel"
-                            >
-                              <X size={14} />
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        <>
-                          <span
-                            className="monthly-task-title"
-                            title={task.title}
-                            onClick={() => handleStartEdit(task)}
-                          >
-                            {task.title}
-                          </span>
-                          <div className="monthly-task-actions">
-                            <button
-                              onClick={() => handleStartEdit(task)}
-                              className="monthly-action-btn"
-                              aria-label="Edit task"
-                              style={{ color: 'var(--text-muted)' }}
-                            >
-                              <Edit2 size={12} />
-                            </button>
-                            {deleteConfirmId === task.id ? (
-                              <div className="monthly-delete-confirm">
-                                <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>Delete?</span>
-                                <button
-                                  onClick={() => handleDeleteConfirm(task.id)}
-                                  className="monthly-action-btn"
-                                  aria-label="Confirm delete"
-                                  style={{ color: 'var(--danger)' }}
-                                >
-                                  <Check size={12} />
-                                </button>
-                                <button
-                                  onClick={() => setDeleteConfirmId(null)}
-                                  className="monthly-action-btn"
-                                  aria-label="Cancel delete"
-                                  style={{ color: 'var(--text-muted)' }}
-                                >
-                                  <X size={12} />
-                                </button>
-                              </div>
-                            ) : (
-                              <button
-                                onClick={() => setDeleteConfirmId(task.id)}
-                                className="monthly-action-btn"
-                                aria-label="Delete task"
-                                style={{ color: 'var(--text-muted)' }}
-                              >
-                                <Trash2 size={12} />
-                              </button>
-                            )}
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Day completion cells - one per day */}
-                  {dayHeaders.map(({ day, isToday, isWeekend }) => {
-                    const isCompleted = task.days?.[day];
-                    return (
-                      <div
-                        key={`${task.id}-${day}`}
-                        className={`monthly-grid-cell monthly-completion-cell ${isToday ? 'is-today' : ''} ${isWeekend ? 'is-weekend' : ''} ${isCompleted ? 'is-completed' : ''}`}
-                        style={{
-                          backgroundColor: isCompleted
-                            ? 'var(--success)'
-                            : isToday
-                            ? 'rgba(59, 130, 246, 0.05)'
-                            : isWeekend
-                            ? 'rgba(100, 116, 139, 0.03)'
-                            : 'transparent',
-                        }}
-                        onClick={() => handleToggleDay(task.id, day)}
-                        role="button"
-                        tabIndex={0}
-                        aria-label={`Toggle ${task.title} for day ${day}`}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault();
-                            handleToggleDay(task.id, day);
-                          }
-                        }}
-                      >
-                        {isCompleted ? (
-                          <Check size={14} className="monthly-check-icon" style={{ color: 'white' }} />
-                        ) : (
-                          <span className="monthly-empty-dot" />
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
+                <MonthlyTaskRow
+                  key={task.id}
+                  task={task}
+                  taskIndex={taskIndex}
+                  totalTasks={data.tasks.length}
+                  dayHeaders={dayHeaders}
+                  onToggleDay={handleToggleDay}
+                  onStartEdit={handleStartEdit}
+                  onSaveEdit={handleSaveEdit}
+                  onCancelEdit={handleCancelEdit}
+                  onDeleteConfirm={handleDeleteConfirm}
+                  editingTaskId={editingTaskId}
+                  editingTitle={editingTitle}
+                  setEditingTitle={setEditingTitle}
+                  deleteConfirmId={deleteConfirmId}
+                  setDeleteConfirmId={setDeleteConfirmId}
+                  onMoveTask={handleMoveTask}
+                />
               ))}
             </div>
           </div>
@@ -433,6 +269,197 @@ export default function MonthlyTracker() {
     </div>
   );
 }
+
+/* ── Extracted Task Row for memoization ── */
+const MonthlyTaskRow = memo(function MonthlyTaskRow({
+  task, taskIndex, totalTasks, dayHeaders,
+  onToggleDay, onStartEdit, onSaveEdit, onCancelEdit, onDeleteConfirm,
+  editingTaskId, editingTitle, setEditingTitle,
+  deleteConfirmId, setDeleteConfirmId, onMoveTask
+}) {
+  const isEditing = editingTaskId === task.id;
+
+  return (
+    <div className="monthly-grid-row monthly-grid-task-row">
+      {/* Task name cell */}
+      <div
+        className="monthly-grid-cell monthly-task-cell sticky-col"
+        style={{
+          color: 'var(--text-primary)',
+          backgroundColor: 'var(--card-bg)',
+        }}
+      >
+        <div className="monthly-task-controls">
+          <div className="monthly-reorder-btns">
+            <button
+              onClick={() => onMoveTask(task.id, 'up')}
+              disabled={taskIndex === 0}
+              className="monthly-reorder-btn"
+              aria-label="Move up"
+              style={{ color: 'var(--text-muted)', opacity: taskIndex === 0 ? 0.3 : 1 }}
+            >
+              <ChevronUp size={12} />
+            </button>
+            <button
+              onClick={() => onMoveTask(task.id, 'down')}
+              disabled={taskIndex === totalTasks - 1}
+              className="monthly-reorder-btn"
+              aria-label="Move down"
+              style={{ color: 'var(--text-muted)', opacity: taskIndex === totalTasks - 1 ? 0.3 : 1 }}
+            >
+              <ChevronDown size={12} />
+            </button>
+          </div>
+
+          {isEditing ? (
+            <div className="monthly-edit-form">
+              <input
+                type="text"
+                value={editingTitle}
+                onChange={(e) => setEditingTitle(e.target.value)}
+                className="monthly-edit-input"
+                style={{
+                  backgroundColor: 'var(--bg-secondary)',
+                  color: 'var(--text-primary)',
+                  border: '1px solid var(--accent)',
+                }}
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') onSaveEdit(task.id);
+                  if (e.key === 'Escape') onCancelEdit();
+                }}
+              />
+              <div className="monthly-edit-actions">
+                <button
+                  onClick={() => onSaveEdit(task.id)}
+                  className="monthly-edit-save"
+                  style={{ color: 'var(--success)' }}
+                  aria-label="Save"
+                >
+                  <Check size={14} />
+                </button>
+                <button
+                  onClick={onCancelEdit}
+                  className="monthly-edit-cancel"
+                  style={{ color: 'var(--danger)' }}
+                  aria-label="Cancel"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <span
+                className="monthly-task-title"
+                title={task.title}
+                onClick={() => onStartEdit(task)}
+              >
+                {task.title}
+              </span>
+              <div className="monthly-task-actions">
+                <button
+                  onClick={() => onStartEdit(task)}
+                  className="monthly-action-btn"
+                  aria-label="Edit task"
+                  style={{ color: 'var(--text-muted)' }}
+                >
+                  <Edit2 size={12} />
+                </button>
+                {deleteConfirmId === task.id ? (
+                  <div className="monthly-delete-confirm">
+                    <span className="text-xs" style={{ color: 'var(--text-secondary)' }}>Delete?</span>
+                    <button
+                      onClick={() => onDeleteConfirm(task.id)}
+                      className="monthly-action-btn"
+                      aria-label="Confirm delete"
+                      style={{ color: 'var(--danger)' }}
+                    >
+                      <Check size={12} />
+                    </button>
+                    <button
+                      onClick={() => setDeleteConfirmId(null)}
+                      className="monthly-action-btn"
+                      aria-label="Cancel delete"
+                      style={{ color: 'var(--text-muted)' }}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setDeleteConfirmId(task.id)}
+                    className="monthly-action-btn"
+                    aria-label="Delete task"
+                    style={{ color: 'var(--text-muted)' }}
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Day completion cells */}
+      {dayHeaders.map(({ day, isToday, isWeekend }) => {
+        const isCompleted = task.days?.[day];
+        return (
+          <div
+            key={`${task.id}-${day}`}
+            className={`monthly-grid-cell monthly-completion-cell ${isToday ? 'is-today' : ''} ${isWeekend ? 'is-weekend' : ''} ${isCompleted ? 'is-completed' : ''}`}
+            style={{
+              backgroundColor: isCompleted
+                ? 'var(--success)'
+                : isToday
+                ? 'rgba(59, 130, 246, 0.05)'
+                : isWeekend
+                ? 'rgba(100, 116, 139, 0.03)'
+                : 'transparent',
+            }}
+            onClick={() => onToggleDay(task.id, day)}
+            role="button"
+            tabIndex={0}
+            aria-label={`Toggle ${task.title} for day ${day}`}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onToggleDay(task.id, day);
+              }
+            }}
+          >
+            {isCompleted ? (
+              <Check size={14} className="monthly-check-icon" style={{ color: 'white' }} />
+            ) : (
+              <span className="monthly-empty-dot" />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}, (prev, next) => {
+  // Custom comparator: only re-render if task data or editing/delete state changed
+  if (prev.task.id !== next.task.id) return false;
+  if (prev.task.title !== next.task.title) return false;
+  if (prev.taskIndex !== next.taskIndex) return false;
+  if (prev.editingTaskId !== next.editingTaskId) return false;
+  if (prev.editingTitle !== next.editingTitle) return false;
+  if (prev.deleteConfirmId !== next.deleteConfirmId) return false;
+  // Deep compare days
+  const prevDays = prev.task.days;
+  const nextDays = next.task.days;
+  if (!prevDays && !nextDays) return true;
+  if (!prevDays || !nextDays) return false;
+  const prevKeys = Object.keys(prevDays);
+  const nextKeys = Object.keys(nextDays);
+  if (prevKeys.length !== nextKeys.length) return false;
+  for (const key of prevKeys) {
+    if (prevDays[key] !== nextDays[key]) return false;
+  }
+  return true;
+});
 
 /* ── Sub-components ── */
 
