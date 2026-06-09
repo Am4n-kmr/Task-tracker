@@ -115,9 +115,26 @@ export default function Login() {
                 if (!loading) e.target.style.backgroundColor = 'var(--accent)';
               }}
             >
-              {loading ? 'Signing in...' : 'Sign In'}
+              {loading ? '🚀 Waking up server...' : 'Sign In'}
             </button>
           </form>
+
+          {loading && (
+  <div
+    className="mt-4 p-3 rounded-lg text-sm text-center animate-pulse"
+    style={{
+      backgroundColor: 'var(--bg-secondary)',
+      color: 'var(--text-secondary)',
+      border: '1px solid var(--border-color)',
+    }}
+  >
+    <p className="font-medium">🚀 Connecting to server...</p>
+    <p className="mt-1 text-xs">
+      The backend may be waking up from sleep.
+      This can take up to 50 seconds on the first visit.
+    </p>
+  </div>
+)}
 
           <div className="mt-6 text-center">
             <p style={{ color: 'var(--text-secondary)' }} className="text-sm">

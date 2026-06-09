@@ -66,19 +66,22 @@ export default function Sidebar() {
   return (
     <>
       {/* Mobile hamburger - fixed positioning with proper z-index */}
-      <button
-        onClick={handleMobileToggle}
-        className="lg:hidden fixed top-4 left-4 z-[60] p-2 rounded-lg transition-all duration-200"
-        style={{ 
-          backgroundColor: 'var(--accent)', 
-          color: 'white',
-          boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
-        }}
-        aria-label={isMobileOpen ? 'Close menu' : 'Open menu'}
-        aria-expanded={isMobileOpen}
-      >
-        {isMobileOpen ? <X size={24} className="transition-transform duration-300" /> : <Menu size={24} />}
-      </button>
+      {/* Mobile hamburger */}
+{!isMobileOpen && (
+  <button
+    onClick={handleMobileToggle}
+    className="lg:hidden fixed top-4 left-4 z-[60] p-2 rounded-lg transition-all duration-200"
+    style={{
+      backgroundColor: 'var(--accent)',
+      color: 'white',
+      boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+    }}
+    aria-label="Open menu"
+    aria-expanded={false}
+  >
+    <Menu size={24} />
+  </button>
+)}
 
       {/* Overlay for mobile - proper z-index hierarchy */}
       {isMobileOpen && (
@@ -105,8 +108,21 @@ export default function Sidebar() {
         }}
       >
         {/* Logo */}
-        <div className="p-6 border-b border-white/10">
-          <div className="flex items-center gap-3">
+        {/* Logo */}
+<div className="p-6 border-b border-white/10 relative">
+
+  {/* Mobile Close Button */}
+  <button
+    onClick={() => setIsMobileOpen(false)}
+    className="lg:hidden absolute top-4 right-4 p-1 rounded-md"
+    style={{
+      color: 'var(--sidebar-text)',
+    }}
+    aria-label="Close menu"
+  >
+    <X size={22} />
+  </button>
+          <div className="flex items-center gap-3 pr-10">
             <div className="w-10 h-10 rounded-lg flex items-center justify-center"
               style={{ backgroundColor: 'var(--accent)' }}>
               <BarChart3 size={24} className="text-white" />
