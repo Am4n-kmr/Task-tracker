@@ -45,6 +45,7 @@ export const tasksAPI = {
   getMonthly: (year, month) => api.get('/tasks/monthly', { params: { year, month } }),
   getAnalytics: (year, month) => api.get('/tasks/analytics', { params: { year, month } }),
   getDashboard: () => api.get('/tasks/dashboard'),
+  getDashboardHistory: (days) => api.get('/tasks/dashboard-history', { params: { days } }),
   getHeatmap: () => api.get('/tasks/heatmap'),
   exportCSV: (year, month) => api.get('/tasks/export/csv', {
     params: { year, month },

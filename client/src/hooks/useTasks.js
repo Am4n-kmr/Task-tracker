@@ -65,6 +65,7 @@ export function useTasks(searchTerm) {
       queryClient.invalidateQueries({ queryKey: ['monthly'] });
       queryClient.invalidateQueries({ queryKey: ['analytics'] });
       queryClient.invalidateQueries({ queryKey: ['heatmap'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboardHistory'] });
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.tasks(searchTerm) });
@@ -149,6 +150,7 @@ export function useTasks(searchTerm) {
       queryClient.invalidateQueries({ queryKey: ['monthly'] });
       queryClient.invalidateQueries({ queryKey: ['analytics'] });
       queryClient.invalidateQueries({ queryKey: ['heatmap'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboardHistory'] });
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.tasks(searchTerm) });
@@ -245,6 +247,7 @@ export function useTasks(searchTerm) {
       queryClient.invalidateQueries({ queryKey: queryKeys.dashboard() });
       queryClient.invalidateQueries({ queryKey: ['heatmap'] });
       queryClient.invalidateQueries({ queryKey: ['analytics'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboardHistory'] });
     },
   });
 
@@ -400,6 +403,7 @@ export function useTasks(searchTerm) {
     onSettled: () => {
       // Soft-refresh in background (does NOT block UI)
       queryClient.invalidateQueries({ queryKey: queryKeys.dashboard() });
+      queryClient.invalidateQueries({ queryKey: ['dashboardHistory'] });
     },
   });
 
@@ -469,6 +473,21 @@ export function useDashboard() {
 /* ──────────────────────────────────────────────────────────────────────────
  * useMonthlyData(year, month)
  * ────────────────────────────────────────────────────────────────────── */
+/* ──────────────────────────────────────────────────────────────────────────
+ * useDashboardHistory(days)
+ * Returns historical completion data for the Dashboard's visible days.
+ * ────────────────────────────────────────────────────────────────────── */
+export function useDashboardHistory(days) {
+  return useQuery({
+    queryKey: queryKeys.dashboardHistory(days),
+    queryFn: async () => {
+      const res = await tasksAPI.getDashboardHistory(days);
+      return res.data.data; // { tasks, completions, startDate, endDate }
+    },
+    staleTime: 1000 * 60 * 2,
+  });
+}
+
 export function useMonthlyData(year, month) {
   const [currentDate, setCurrentDate] = useState(() => {
     // When year/month are provided from URL, use them. Otherwise default to current month.

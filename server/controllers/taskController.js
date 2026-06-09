@@ -241,12 +241,16 @@ const getMonthlyTracker = async (req, res) => {
 
     // Organize completions by task_id and date
     const completionMap = {};
-    completions.forEach(tc => {
-      if (!completionMap[tc.task_id]) {
-        completionMap[tc.task_id] = {};
-      }
-      completionMap[tc.task_id][tc.completion_date] = true;
-    });
+
+completions.forEach(tc => {
+  if (!completionMap[tc.task_id]) {
+    completionMap[tc.task_id] = {};
+  }
+
+  const dateKey = formatLocalDate(tc.completion_date);
+
+  completionMap[tc.task_id][dateKey] = true;
+});
 
     // Get last day of month
     const lastDay = new Date(year, month, 0).getDate();
@@ -302,11 +306,16 @@ const getAnalytics = async (req, res) => {
     
     // Build daily involvement percentage for each day
     const dailyPercentages = {};
-    dailyStats.forEach(stat => {
-      const total = parseInt(stat.total_tasks) || totalTasks;
-      const completed = parseInt(stat.completed_count);
-      dailyPercentages[stat.completion_date] = total > 0 ? Math.round((completed / total) * 100) : 0;
-    });
+
+dailyStats.forEach(stat => {
+  const total = parseInt(stat.total_tasks) || totalTasks;
+  const completed = parseInt(stat.completed_count);
+
+  const dateKey = formatLocalDate(stat.completion_date);
+
+  dailyPercentages[dateKey] =
+    total > 0 ? Math.round((completed / total) * 100) : 0;
+});
 
     // Fill in all days of month
     const dailyChartData = [];
@@ -390,6 +399,70 @@ const getDashboardStats = async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Failed to fetch dashboard stats' 
+    });
+  }
+};
+
+function formatLocalDate(date) {
+  const d = new Date(date);
+
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+
+  return `${year}-${month}-${day}`;
+}
+
+const getDashboardHistory = async (req, res) => {
+  try {
+    const tasks = await Task.getAllByUser(req.user.id);
+    
+    // Calculate date range based on today
+    const today = new Date();
+    // Default to 14 days for the API (client will request what it needs)
+    const dayCount = parseInt(req.query.days) || 14;
+    const startDate = new Date(today);
+    startDate.setDate(startDate.getDate() - (dayCount - 1));
+    
+    const startStr = formatLocalDate(startDate);
+const endStr = formatLocalDate(today);
+
+    const completions = await TaskCompletion.getByUserAndDateRange(req.user.id, startStr, endStr);
+
+    // Build a completion lookup: { task_id: { date: true, ... }, ... }
+    const completionMap = {};
+
+completions.forEach(tc => {
+  if (!completionMap[tc.task_id]) {
+    completionMap[tc.task_id] = {};
+  }
+
+  const dateKey = formatLocalDate(tc.completion_date);
+
+  completionMap[tc.task_id][dateKey] = true;
+});
+
+    // Attach completion data to each task for the visible days
+    const tasksWithHistory = tasks.map(task => ({
+      ...task,
+      completions: completionMap[task.id] || {},
+      completed_today: !!(completionMap[task.id] && completionMap[task.id][endStr])
+    }));
+
+    res.status(200).json({
+      success: true,
+      data: {
+        tasks: tasksWithHistory,
+        completions,
+        startDate: startStr,
+        endDate: endStr,
+      }
+    });
+  } catch (error) {
+    console.error('[TASKS] Error fetching dashboard history:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch dashboard history: ' + error.message
     });
   }
 };
@@ -549,6 +622,7 @@ module.exports = {
   getMonthlyTracker,
   getAnalytics,
   getDashboardStats,
+  getDashboardHistory,
   getHeatmap,
   exportCSV,
   reorderTask,

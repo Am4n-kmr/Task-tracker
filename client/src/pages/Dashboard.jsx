@@ -1,6 +1,6 @@
 import { useState, useMemo, memo, useCallback, useRef, useEffect } from 'react';
 import { Plus, Target, Flame, Trophy, CheckCircle, Circle, X, ChevronDown, ChevronUp, Activity, Edit2, Trash2, Check, GripVertical } from 'lucide-react';
-import { useTasks, useDashboard } from '../hooks/useTasks';
+import { useTasks, useDashboard, useDashboardHistory } from '../hooks/useTasks';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import { Line } from 'react-chartjs-2';
@@ -54,14 +54,25 @@ function getDayCount(containerWidth) {
 }
 
 /* ── Build visible days (single source of truth, newest RIGHT) ────── */
+function formatLocalDate(date) {
+  const d = new Date(date);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+
+  return `${year}-${month}-${day}`;
+}
+
 function buildVisibleDays(count) {
   const days = [];
   const now = new Date();
+
   for (let i = count - 1; i >= 0; i--) {
     const d = new Date(now);
     d.setDate(d.getDate() - i);
+
     days.push({
-      date: d.toISOString().split('T')[0],
+      date: formatLocalDate(d),
       dayName: d.toLocaleDateString('en-US', { weekday: 'short' }),
       day: d.getDate(),
       isToday: i === 0,
@@ -69,7 +80,8 @@ function buildVisibleDays(count) {
       dateObj: d,
     });
   }
-  return days; // oldest left, newest right
+
+  return days;
 }
 
 export default function Dashboard() {
@@ -94,6 +106,10 @@ export default function Dashboard() {
 
   // ── SINGLE SOURCE OF TRUTH: visibleDays ────────────────────────────
   const visibleDays = useMemo(() => buildVisibleDays(Math.max(dayCount, 4)), [dayCount]);
+
+  // ── Fetch historical completions for visible days ──────────────────
+const { data: historyData } = useDashboardHistory(dayCount);
+const historyTasks = historyData?.tasks || null;
 
   const hasLoadedRef = useRef(false);
   const showInitialSkeleton = !hasLoadedRef.current && (tasksLoading || statsLoading);
@@ -191,16 +207,37 @@ export default function Dashboard() {
 
   // ── Weekly data for chart (from dashboard stats) ──
   const weeklyData = useMemo(() => {
-    return visibleDays.map(d => {
-      const isToday = d.isToday;
-      const completed = isToday ? tasks.filter(t => t.completed_today).length : (stats?.weeklyData?.find(w => w.date === d.date)?.completed || 0);
-      const total = tasks.length || stats?.totalTasks || 1;
-      const percentage = isToday
-        ? (total > 0 ? Math.round((completed / total) * 100) : 0)
-        : (stats?.weeklyData?.find(w => w.date === d.date)?.percentage || 0);
-      return { date: d.date, label: d.dayName, day: d.day, percentage, completed, total, isToday };
-    });
-  }, [visibleDays, tasks, stats]);
+  return visibleDays.map(d => {
+    const isToday = d.isToday;
+
+    let completed = 0;
+
+    if (isToday) {
+      completed = tasks.filter(t => t.completed_today).length;
+    } else if (historyData?.completions) {
+      completed = historyData.completions.filter(c => {
+        return formatLocalDate(c.completion_date) === d.date;
+      }).length;
+    }
+
+    const total = tasks.length || stats?.totalTasks || 1;
+
+    const percentage =
+      total > 0
+        ? Math.round((completed / total) * 100)
+        : 0;
+
+    return {
+      date: d.date,
+      label: d.dayName,
+      day: d.day,
+      percentage,
+      completed,
+      total,
+      isToday,
+    };
+  });
+}, [visibleDays, tasks, stats, historyData]);
 
   // ── Chart colors ──────────────────────────────────────────────────
   const chartColors = useMemo(() => {
@@ -350,6 +387,7 @@ export default function Dashboard() {
                 deleteConfirmId={deleteConfirmId}
                 onDeleteConfirm={handleDeleteConfirm}
                 onCancelDelete={() => setDeleteConfirmId(null)}
+                historyTasks={historyTasks}
               />
             </SortableContext>
           </DndContext>
@@ -461,7 +499,8 @@ export default function Dashboard() {
 const CheckinBoard = memo(function CheckinBoard({
   tasks, visibleDays, onToggle, togglingId,
   editingTaskId, editingTitle, onStartEdit, onSaveEdit, onCancelEdit,
-  onDeleteRequest, deleteConfirmId, onDeleteConfirm, onCancelDelete
+  onDeleteRequest, deleteConfirmId, onDeleteConfirm, onCancelDelete,
+  historyTasks
 }) {
   dlog('CheckinBoard render');
 
@@ -515,6 +554,7 @@ const CheckinBoard = memo(function CheckinBoard({
             isDeleteConfirm={deleteConfirmId === task.id}
             onDeleteConfirm={() => onDeleteConfirm(task.id)}
             onCancelDelete={onCancelDelete}
+            historyTasks={historyTasks}
           />
         ))}
       </div>
@@ -528,7 +568,8 @@ const CheckinBoard = memo(function CheckinBoard({
 const CheckinGridRow = memo(function CheckinGridRow({
   task, visibleDays, onToggle, isToggling,
   isEditing, editingTitle, onStartEdit, onSaveEdit, onCancelEdit,
-  onDeleteRequest, isDeleteConfirm, onDeleteConfirm, onCancelDelete
+  onDeleteRequest, isDeleteConfirm, onDeleteConfirm, onCancelDelete,
+  historyTasks
 }) {
   dlog('CheckinGridRow render', task.id);
 
@@ -631,18 +672,30 @@ const CheckinGridRow = memo(function CheckinGridRow({
       </div>
 
       {/* Day cells - rendered from visibleDays, same source as header */}
-      {visibleDays.map((d) => (
-        <div
-          key={d.date}
-          className={`checkin-grid-cell checkin-day-cell ${d.isToday ? 'is-today' : ''}`}
-        >
-          <CheckinCell
-            checked={d.isToday ? task.completed_today : false}
-            onClick={() => d.isToday ? onToggle(task.id) : null}
-            isToggling={isToggling && d.isToday}
-          />
-        </div>
-      ))}
+      {visibleDays.map((d) => {
+        // For past days, look up historical completion from historyTasks
+        let isChecked = false;
+        if (d.isToday) {
+          isChecked = task.completed_today;
+        } else if (historyTasks) {
+          const historyTask = historyTasks.find(ht => ht.id === task.id);
+          if (historyTask && historyTask.completions) {
+            isChecked = !!historyTask.completions[d.date];
+          }
+        }
+        return (
+          <div
+            key={d.date}
+            className={`checkin-grid-cell checkin-day-cell ${d.isToday ? 'is-today' : ''}`}
+          >
+            <CheckinCell
+              checked={isChecked}
+              onClick={() => d.isToday ? onToggle(task.id) : null}
+              isToggling={isToggling && d.isToday}
+            />
+          </div>
+        );
+      })}
     </div>
   );
 }, (prev, next) =>
@@ -651,7 +704,8 @@ const CheckinGridRow = memo(function CheckinGridRow({
   prev.task.completed_today === next.task.completed_today &&
   prev.isToggling === next.isToggling &&
   prev.isEditing === next.isEditing &&
-  prev.isDeleteConfirm === next.isDeleteConfirm
+  prev.isDeleteConfirm === next.isDeleteConfirm &&
+  prev.historyTasks === next.historyTasks
 );
 
 /* ══════════════════════════════════════════════════════════════════════

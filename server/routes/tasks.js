@@ -11,6 +11,7 @@ const {
   getMonthlyTracker,
   getAnalytics,
   getDashboardStats,
+  getDashboardHistory,
   getHeatmap,
   exportCSV,
   reorderTask,
@@ -48,6 +49,7 @@ router.post('/:id/toggle-by-date', toggleTaskCompletionByDate);
 router.get('/monthly', getMonthlyTracker);
 router.get('/analytics', getAnalytics);
 router.get('/dashboard', getDashboardStats);
+router.get('/dashboard-history', getDashboardHistory);
 router.get('/heatmap', getHeatmap);
 router.get('/export/csv', exportCSV);
 

@@ -209,6 +209,28 @@ class TaskCompletion {
   }
 
   /**
+   * Get completions for a user within a date range
+   * @param {string} userId
+   * @param {string} startDate - YYYY-MM-DD
+   * @param {string} endDate - YYYY-MM-DD
+   * @returns {Array} completions with task info
+   */
+  static async getByUserAndDateRange(userId, startDate, endDate) {
+    const result = await pool.query(
+      `SELECT tc.*, t.title as task_title 
+       FROM task_completions tc 
+       JOIN tasks t ON tc.task_id = t.id 
+       WHERE tc.user_id = $1 
+       AND tc.completion_date >= $2 
+       AND tc.completion_date <= $3 
+       AND tc.completed = TRUE
+       ORDER BY tc.completion_date, t.title`,
+      [userId, startDate, endDate]
+    );
+    return result.rows;
+  }
+
+  /**
    * Get heatmap data for the past year
    * @param {string} userId
    * @returns {Array} daily completion percentages

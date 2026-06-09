@@ -3,6 +3,16 @@ import { Info } from 'lucide-react';
 import { useHeatmap } from '../hooks/useTasks';
 import { formatDate, getHeatmapColor } from '../utils/helpers';
 
+function formatLocalDate(date) {
+  const d = new Date(date);
+
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+
+  return `${year}-${month}-${day}`;
+}
+
 export default function Heatmap() {
   console.log('Heatmap render');
   const { data, loading } = useHeatmap();
@@ -10,10 +20,14 @@ export default function Heatmap() {
   const tooltipRef = useRef(null);
 
   const dateMap = useMemo(() => {
-    const map = {};
-    data.forEach(d => { map[d.date] = d.percentage; });
-    return map;
-  }, [data]);
+  const map = {};
+
+  data.forEach(d => {
+    map[formatLocalDate(d.date)] = d.percentage;
+  });
+
+  return map;
+}, [data]);
 
   const weeks = useMemo(() => {
     const today = new Date();
@@ -31,7 +45,7 @@ export default function Heatmap() {
     while (currentDate <= today) {
       const week = [];
       for (let i = 0; i < 7; i++) {
-        const dateStr = currentDate.toISOString().split('T')[0];
+        const dateStr = formatLocalDate(currentDate);
         week.push({
           date: dateStr,
           percentage: dateMap[dateStr] || 0,
@@ -44,17 +58,22 @@ export default function Heatmap() {
     return result;
   }, [dateMap]);
 
-  const stats = useMemo(() => {
-    const totalDays = data.length;
-    const daysWithActivity = data.filter(d => d.percentage > 0).length;
-    const average = totalDays > 0
-      ? Math.round(data.reduce((sum, d) => sum + d.percentage, 0) / totalDays)
-      : 0;
-    const best = data.reduce((best, d) =>
-      (d.percentage > (best?.percentage || 0)) ? d : best, data[0]
-    );
-    return { totalDays, daysWithActivity, average, best };
-  }, [data]);
+ const stats = useMemo(() => {
+  const totalDays = data.length;
+  const daysWithActivity = data.filter(d => d.percentage > 0).length;
+  const average = totalDays > 0
+    ? Math.round(data.reduce((sum, d) => sum + d.percentage, 0) / totalDays)
+    : 0;
+
+  const best = data.reduce((best, d) =>
+    (d.percentage > (best?.percentage || 0)) ? d : best,
+    data[0]
+  );
+
+  return { totalDays, daysWithActivity, average, best };
+}, [data]);
+
+
 
   // Stable tooltip positioning - no layout shift
   const showTooltip = useCallback((day, clientX, clientY) => {
@@ -103,7 +122,19 @@ export default function Heatmap() {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <StatCard label="Active Days" value={stats.daysWithActivity} sub={`Out of ${stats.totalDays} days`} />
         <StatCard label="Average Daily" value={`${stats.average}%`} sub="Completion rate" />
-        <StatCard label="Best Day" value={stats.best ? `${stats.best.percentage}%` : 'N/A'} sub={stats.best ? formatDate(stats.best.date) : 'No data'} />
+        <StatCard
+  label="Best Day"
+  value={stats.best ? `${stats.best.percentage}%` : 'N/A'}
+  sub={
+    stats.best?.date
+      ? new Date(stats.best.date).toLocaleDateString('en-US', {
+          day: 'numeric',
+          month: 'short',
+          year: 'numeric',
+        })
+      : 'No data'
+  }
+/>
       </div>
 
       {/* Heatmap */}

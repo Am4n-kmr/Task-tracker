@@ -6,6 +6,7 @@
 export const queryKeys = {
   tasks: (search) => ['tasks', search ?? null],
   dashboard: () => ['dashboard'],
+  dashboardHistory: (days) => ['dashboardHistory', days],
   heatmap: () => ['heatmap'],
   analytics: (year, month) => ['analytics', year, month],
   monthly: (year, month) => ['monthly', year, month],
